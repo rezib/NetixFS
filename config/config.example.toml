@@ -1,0 +1,311 @@
+# NetixFS – example configuration file
+#
+# Copy this file to a convenient location and pass it with:
+#   netixfs --config-file /etc/netixfs/config.toml
+# or set the environment variable:
+#   NETIXFS_CONFIG_FILE=/etc/netixfs/config.toml
+#
+# Every setting is optional unless marked MANDATORY.  When a setting is absent
+# the built-in default shown in the comment is used.
+#
+# Precedence (lowest → highest): this file < environment variables < CLI args.
+# All environment variables use the NETIXFS_ prefix; names mirror the TOML
+# key path with dots replaced by underscores and letters uppercased.
+# Example: server.port → NETIXFS_SERVER_PORT
+
+
+# ── Server ────────────────────────────────────────────────────────────────────
+
+[server]
+
+# Network address the HTTP listener binds to.
+# Use 0.0.0.0 or :: to accept connections on all interfaces.
+# CLI: --bind-address   Env: NETIXFS_SERVER_BIND_ADDRESS
+bind_address = "127.0.0.1"
+
+# TCP port for the main HTTP listener.
+# CLI: --port   Env: NETIXFS_SERVER_PORT
+port = 8080
+
+# Externally visible base URL used in generated links and diagnostics.
+# Leave unset when NetixFS sits behind a reverse proxy that rewrites the host.
+# CLI: --public-base-url   Env: NETIXFS_SERVER_PUBLIC_BASE_URL
+# public_base_url = "https://netixfs.example.com"
+
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+#
+# Native TLS is off by default.  When disabled, operators must provide
+# transport security through an upstream TLS-terminating proxy.
+# When enabled, cert_path and key_path are MANDATORY.
+
+[tls]
+
+# CLI: --tls-enabled   Env: NETIXFS_TLS_ENABLED
+enabled = false
+
+# Path to the PEM certificate chain (required when enabled = true).
+# CLI: --tls-cert-path   Env: NETIXFS_TLS_CERT_PATH
+# cert_path = "/etc/netixfs/tls.crt"
+
+# Path to the PEM private key (required when enabled = true).
+# CLI: --tls-key-path   Env: NETIXFS_TLS_KEY_PATH
+# key_path = "/etc/netixfs/tls.key"
+
+
+# ── Authentication ────────────────────────────────────────────────────────────
+#
+# Exactly one JWT key source must be configured (enforced in step 2).
+# The four mutually exclusive sources are, in order of preference:
+#   jwks_url       – remote JWKS document, refreshed automatically  (preferred)
+#   jwks_path      – local JWKS file, good for air-gapped deployments
+#   public_key_url – single remote public key, no automatic rotation
+#   public_key_path – single local public key, simplest setup
+
+[auth.jwt]
+
+# Remote JWKS URL (preferred – supports automatic key rotation).
+# CLI: --jwt-jwks-url   Env: NETIXFS_AUTH_JWT_JWKS_URL
+jwks_url = "https://idp.example.com/.well-known/jwks.json"
+
+# Local JWKS file.
+# CLI: --jwt-jwks-path   Env: NETIXFS_AUTH_JWT_JWKS_PATH
+# jwks_path = "/etc/netixfs/jwks.json"
+
+# Single remote public key.
+# CLI: --jwt-public-key-url   Env: NETIXFS_AUTH_JWT_PUBLIC_KEY_URL
+# public_key_url = "https://idp.example.com/jwt.pub"
+
+# Single local public key.
+# CLI: --jwt-public-key-path   Env: NETIXFS_AUTH_JWT_PUBLIC_KEY_PATH
+# public_key_path = "/etc/netixfs/jwt.pub"
+
+# Expected value of the token's `iss` claim.
+# Issuer validation is enabled only when this setting is present.
+# CLI: --jwt-issuer   Env: NETIXFS_AUTH_JWT_ISSUER
+issuer = "https://idp.example.com/realms/main"
+
+# Expected value of the token's `aud` claim.
+# Audience validation is enabled only when this setting is present.
+# CLI: --jwt-audience   Env: NETIXFS_AUTH_JWT_AUDIENCE
+audience = "netixfs"
+
+# JWT claim that maps to the local POSIX username before NSS resolution.
+# CLI: --jwt-username-claim   Env: NETIXFS_AUTH_JWT_USERNAME_CLAIM
+# Default: "sub"
+username_claim = "preferred_username"
+
+# How often remote key sources are refreshed.  Accepts: 30s, 5m, 1h, etc.
+# CLI: --jwt-remote-key-refresh-interval   Env: NETIXFS_AUTH_JWT_REMOTE_KEY_REFRESH_INTERVAL
+# Default: "5m"
+remote_key_refresh_interval = "5m"
+
+
+# ── Filesystem ────────────────────────────────────────────────────────────────
+#
+# MANDATORY: at least one entry in allowed_roots is required.
+
+[filesystem]
+
+# Named filesystem roots exposed at /api/v1/roots/{id}/...
+# Format: "id=absolute-path"  (one string per root)
+# CLI: --allowed-root (repeatable)   Env: NETIXFS_FILESYSTEM_ALLOWED_ROOTS (comma-separated)
+allowed_roots = [
+  "home=/srv/netixfs/home",
+  "uploads=/srv/netixfs/uploads",
+]
+
+# Disable all write operations while keeping read APIs available.
+# CLI: --read-only   Env: NETIXFS_FILESYSTEM_READ_ONLY
+# Default: false
+read_only = false
+
+# Base permission bits for new files (octal string).
+# CLI: --default-file-mode   Env: NETIXFS_FILESYSTEM_DEFAULT_FILE_MODE
+# Default: "0644"
+default_file_mode = "0644"
+
+# Base permission bits for new directories (octal string).
+# CLI: --default-dir-mode   Env: NETIXFS_FILESYSTEM_DEFAULT_DIR_MODE
+# Default: "0755"
+default_dir_mode = "0755"
+
+# Umask applied on top of the mode bits above (octal string).
+# Unset means inherit the process umask.
+# CLI: --umask   Env: NETIXFS_FILESYSTEM_UMASK
+# umask = "0022"
+
+# Symlink traversal policy: "reject" or "follow_safe".
+# "reject" refuses any path that resolves through a symlink.
+# "follow_safe" allows traversal as long as the resolved path stays inside the root.
+# CLI: --symlink-policy   Env: NETIXFS_FILESYSTEM_SYMLINK_POLICY
+# Default: "reject"
+symlink_policy = "reject"
+
+# Allow path resolution to cross filesystem mount boundaries under an allowed root.
+# CLI: --allow-mount-crossing   Env: NETIXFS_FILESYSTEM_ALLOW_MOUNT_CROSSING
+# Default: false
+allow_mount_crossing = false
+
+
+# ── Operations ────────────────────────────────────────────────────────────────
+
+[operations]
+
+# Allow DELETE requests to remove non-empty directory trees.
+# CLI: --allow-recursive-delete   Env: NETIXFS_OPERATIONS_ALLOW_RECURSIVE_DELETE
+# Default: true
+allow_recursive_delete = true
+
+# Allow copy requests that copy entire directory trees.
+# CLI: --allow-recursive-copy   Env: NETIXFS_OPERATIONS_ALLOW_RECURSIVE_COPY
+# Default: true
+allow_recursive_copy = true
+
+# Allow mode changes through the Permissions API.
+# CLI: --allow-chmod   Env: NETIXFS_OPERATIONS_ALLOW_CHMOD
+# Default: true
+allow_chmod = true
+
+# Allow hard-link creation.
+# CLI: --allow-hard-links   Env: NETIXFS_OPERATIONS_ALLOW_HARD_LINKS
+# Default: true
+allow_hard_links = true
+
+# Allow symbolic-link creation.
+# CLI: --allow-symlink-create   Env: NETIXFS_OPERATIONS_ALLOW_SYMLINK_CREATE
+# Default: true
+allow_symlink_create = true
+
+
+# ── Limits ────────────────────────────────────────────────────────────────────
+
+[limits]
+
+# Maximum accepted request body size for write operations.
+# Accepts: 10MiB, 100MiB, 1GiB, etc.
+# CLI: --max-request-body-size   Env: NETIXFS_LIMITS_MAX_REQUEST_BODY_SIZE
+# Default: "100MiB"
+max_request_body_size = "100MiB"
+
+# Maximum response size for non-streaming file reads.
+# Clients wanting larger files should use range requests or the streaming API.
+# CLI: --max-read-size   Env: NETIXFS_LIMITS_MAX_READ_SIZE
+# Default: "100MiB"
+max_read_size = "100MiB"
+
+# Maximum directory entries returned per listing page.
+# CLI: --max-directory-entries   Env: NETIXFS_LIMITS_MAX_DIRECTORY_ENTRIES
+# Default: 10000
+max_directory_entries = 10000
+
+# Maximum in-flight HTTP requests across all connections.
+# Requests over this limit receive 429 Too Many Requests.
+# CLI: --max-concurrent-requests   Env: NETIXFS_LIMITS_MAX_CONCURRENT_REQUESTS
+# Default: 1024
+max_concurrent_requests = 1024
+
+# Maximum simultaneous streaming responses.
+# CLI: --max-concurrent-streams   Env: NETIXFS_LIMITS_MAX_CONCURRENT_STREAMS
+# Default: 128
+max_concurrent_streams = 128
+
+
+# ── Streaming ─────────────────────────────────────────────────────────────────
+
+[streaming]
+
+# Maximum time a stream may be idle before it is closed.
+# Accepts: 30s, 5m, 1h, etc.
+# CLI: --stream-idle-timeout   Env: NETIXFS_STREAMING_IDLE_TIMEOUT
+# Default: "5m"
+idle_timeout = "5m"
+
+# Maximum total lifetime of a streaming response.
+# CLI: --stream-max-duration   Env: NETIXFS_STREAMING_MAX_DURATION
+# Default: "1h"
+max_duration = "1h"
+
+# Optional heartbeat write interval for idle streams; "0" disables heartbeats.
+# CLI: --stream-heartbeat-interval   Env: NETIXFS_STREAMING_HEARTBEAT_INTERVAL
+# Default: "30s"
+heartbeat_interval = "30s"
+
+
+# ── Worker Pool ───────────────────────────────────────────────────────────────
+
+[pool]
+
+# Maximum total live worker processes across all identities.
+# CLI: --pool-max-workers   Env: NETIXFS_POOL_MAX_WORKERS
+# Default: 64
+max_workers = 64
+
+# How long an idle worker may stay alive after its last operation.
+# CLI: --pool-idle-timeout   Env: NETIXFS_POOL_IDLE_TIMEOUT
+# Default: "5m"
+idle_timeout = "5m"
+
+# Maximum duration for a single non-streaming worker operation.
+# CLI: --pool-request-timeout   Env: NETIXFS_POOL_REQUEST_TIMEOUT
+# Default: "30s"
+request_timeout = "30s"
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+[logging]
+
+# Minimum log severity to emit.  One of: error, warn, info, debug, trace.
+# The --verbose / -v CLI flag overrides this: -v → debug, -vv → trace.
+# CLI: --log-level   Env: NETIXFS_LOGGING_LEVEL
+# Default: "info"
+level = "info"
+
+# Log output format.  One of: json, pretty, compact.
+# Use "json" in production for structured ingestion; "pretty" for local debugging.
+# CLI: --log-format   Env: NETIXFS_LOGGING_FORMAT
+# Default: "json"
+format = "json"
+
+# Redact filesystem paths in operational and audit logs.
+# Enable in environments where filenames are considered sensitive.
+# CLI: --log-redact-paths   Env: NETIXFS_LOGGING_REDACT_PATHS
+# Default: false
+redact_paths = false
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+[metrics]
+
+# Expose a Prometheus-compatible /metrics endpoint on a dedicated listener.
+# CLI: --metrics-enabled   Env: NETIXFS_METRICS_ENABLED
+# Default: false
+enabled = true
+
+# Address for the metrics listener.  Loopback is safest when scraped locally.
+# CLI: --metrics-bind-address   Env: NETIXFS_METRICS_BIND_ADDRESS
+# Default: "127.0.0.1"
+bind_address = "127.0.0.1"
+
+# Port for the metrics listener.
+# CLI: --metrics-port   Env: NETIXFS_METRICS_PORT
+# Default: 9090
+port = 9090
+
+
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+
+[diagnostics.config_endpoint]
+
+# Expose a read-only endpoint that returns the resolved runtime configuration.
+# Keep this disabled or loopback-bound in production.
+# CLI: --config-endpoint-enabled   Env: NETIXFS_DIAGNOSTICS_CONFIG_ENDPOINT_ENABLED
+# Default: false
+enabled = false
+
+# Address and port for the configuration endpoint (host:port format).
+# CLI: --config-endpoint-bind-address   Env: NETIXFS_DIAGNOSTICS_CONFIG_ENDPOINT_BIND_ADDRESS
+# Default: "127.0.0.1:8081"
+bind_address = "127.0.0.1:8081"

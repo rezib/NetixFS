@@ -3,28 +3,6 @@
 version = 4
 
 [[package]]
-name = "NetixFS"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-server",
- "bytes",
- "clap",
- "eyre",
- "futures",
- "headers",
- "http-body-util",
- "serde",
- "tokio",
- "tokio-util",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -789,6 +767,29 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "netixfs"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-server",
+ "bytes",
+ "clap",
+ "eyre",
+ "futures",
+ "headers",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
-use crate::{Authenticator, Config, User};
+use crate::config::Config;
+use crate::user::{Authenticator, User};
 use axum::{
-    Extension, Router,
+    Extension, Json, Router,
     body::Body,
     extract::Path as RequestPath,
     http::{HeaderValue, StatusCode, header},
@@ -9,7 +10,7 @@ use axum::{
 };
 use bytes::Bytes;
 use eyre::Result;
-use http_body_util::StreamBody;
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -24,6 +25,12 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
+
+mod ready;
+
+async fn health() -> Json<Value> {
+    Json(json!({ "status": "ok" }))
+}
 
 fn sanitize_path(user_data_root: &Path, file_path: String) -> Result<PathBuf, StatusCode> {
     let file_path = user_data_root
@@ -99,7 +106,10 @@ async fn delete_file(
 }
 
 pub(crate) fn service(config: &Config) -> Router {
-    let authenticator = Authenticator::new(config.data_root.clone());
+    // Use the first configured root as the data root for authentication.
+    // resolve() guarantees allowed_roots is non-empty.
+    let data_root = config.filesystem.allowed_roots[0].path.clone();
+    let authenticator = Authenticator::new(data_root);
 
     let middleware = ServiceBuilder::new()
         // Mark the `Authorization` and `Cookie` headers as sensitive so it doesn't show in logs
@@ -129,6 +139,8 @@ pub(crate) fn service(config: &Config) -> Router {
         );
 
     Router::new()
+        .route("/healthz", get(health))
+        .route("/readyz", get(ready::run_checks))
         .route(
             "/{*path}",
             get(read_file).post(write_file).delete(delete_file),
