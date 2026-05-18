@@ -1,21 +1,21 @@
-# NetixFS Technical Specification
+# NetixFS Technical Specifications
 
 ## 1. Purpose
 
-NetixFS is a Linux-only service that exposes selected POSIX filesystem
+NetixFS must be a Linux-only service that exposes selected POSIX filesystem
 operations through an HTTP(S) API.
 
-The service acts as an HTTP proxy for filesystem access. It is intended to let
-remote clients perform high-level file and directory operations that would
-normally be performed from a shell, while preserving POSIX permission semantics
-as much as possible.
+The service must act as an HTTP proxy for filesystem access. It must let remote
+clients perform high-level file and directory operations that would normally be
+performed from a shell, while preserving POSIX permission semantics as much as
+possible.
 
-The goal of NetisFS is to offer a simple HTTP(S) API for end-user file
-management, with an interface that is easy to integrate into applications.
+NetixFS must offer a simple HTTP(S) API for end-user file management, with an
+interface that is easy to integrate into applications.
 
 ## 2. Product Scope
 
-### Goals
+### 2.1 Goals
 
 - Provide a REST-style API for common high-level file management tasks involving
   files, directories, metadata, and streams.
@@ -26,57 +26,57 @@ management, with an interface that is easy to integrate into applications.
 - Provide deployment and configuration that remain simple enough for service
   operators to reason about.
 
-### Non-Goals
+### 2.2 Non-Goals
 
 - NetixFS must not implement primary user authentication itself.
 - NetixFS must not provide its own user database.
-- NetixFS is not a distributed filesystem and must not attempt to replicate,
+- NetixFS must not be a distributed filesystem and must not attempt to replicate,
   synchronize, or cache filesystem state across hosts.
-- NetixFS does not expose a background job API for asynchronous operations.
-- NetixFS is not intended to be a general-purpose, low-level POSIX filesystem
-  API for applications (eg. file locking).
+- NetixFS must not expose a background job API for asynchronous operations.
+- NetixFS must not be a general-purpose, low-level POSIX filesystem API for
+  applications (eg. file locking).
 
 ## 3. Design Guidelines
 
-### Implementation
+### 3.1 Implementation
 
 NetixFS must be implemented in Rust and should prefer memory-safe libraries.
 Unsafe Rust should be minimal and justified for each unsafe block.
 
-NetixFS is Linux-only. It should work on currently supported Linux kernels and
-Linux distributions, meaning kernels and distributions that still receive
+NetixFS must be Linux-only. It should work on currently supported Linux kernels
+and Linux distributions, meaning kernels and distributions that still receive
 upstream or vendor security updates. Runtime assumptions are detailed in
 [section 4](#4-system-requirements).
 
-### Security And Identity
+### 3.2 Security And Identity
 
-NetixFS validates JWTs itself before performing filesystem operations. It maps
-the configured JWT username claim to a local Linux UID, primary GID, and
-supplementary groups through NSS. Authentication requirements are detailed in
-[section 7](#7-authentication-boundary), and identity mapping is detailed in
+NetixFS must validate JWTs itself before performing filesystem operations. It
+must map the configured JWT username claim to a local Linux UID, primary GID,
+and supplementary groups through NSS. Authentication requirements are detailed
+in [section 7](#7-authentication-boundary), and identity mapping is detailed in
 [section 8](#8-identity-mapping).
 
-### Execution Model
+### 3.3 Execution Model
 
-NetixFS uses the supervisor/worker model defined in
-[section 5](#5-software-architecture). The supervisor handles the HTTP API,
+NetixFS must use the supervisor/worker model defined in
+[section 5](#5-software-architecture). The supervisor must handle the HTTP API,
 authentication, identity resolution, request validation, routing, cancellation,
-and worker lifecycle management. Workers execute filesystem operations under the
-resolved UID, primary GID, and supplementary groups.
+and worker lifecycle management. Workers must execute filesystem operations
+under the resolved UID, primary GID, and supplementary groups.
 
-The worker pool is bounded, and each worker process is bound to one resolved
-local identity for its lifetime. Worker pool limits and backpressure behavior
-are detailed in [section 5](#5-software-architecture).
+The worker pool must be bounded, and each worker process must be bound to one
+resolved local identity for its lifetime. Worker pool limits and backpressure
+behavior are detailed in [section 5](#5-software-architecture).
 
-### Configuration
+### 3.4 Configuration
 
-NetixFS supports configuration through a TOML configuration file, environment
-variables, and command-line arguments. Configuration precedence is, from lowest
-to highest: TOML configuration file, environment variables, then command-line
-arguments. Configuration settings are detailed in
+NetixFS must support configuration through a TOML configuration file,
+environment variables, and command-line arguments. Configuration precedence
+must be, from lowest to highest: TOML configuration file, environment variables,
+then command-line arguments. Configuration settings are detailed in
 [section 12](#12-configuration).
 
-### Deployment
+### 3.5 Deployment
 
 NetixFS should be deployable as:
 
@@ -98,16 +98,16 @@ The runtime environment must provide:
 
 ## 5. Software Architecture
 
-NetixFS uses a supervisor/worker architecture. The supervisor owns the
+NetixFS must use a supervisor/worker architecture. The supervisor must own the
 network-facing API, request validation, routing, cancellation, and worker
-lifecycle. Workers own filesystem execution after switching to local Linux
+lifecycle. Workers must own filesystem execution after switching to local Linux
 identities.
 
-### Supervisor And Worker Model
+### 5.1 Supervisor And Worker Model
 
-The supervisor handles all network-facing and control-plane work. Workers handle
-only filesystem operations received through their IPC socket after switching to
-the resolved local Linux identity.
+The supervisor must handle all network-facing and control-plane work. Workers
+must handle only filesystem operations received through their IPC socket after
+switching to the resolved local Linux identity.
 
 ```mermaid
 flowchart TD
@@ -173,10 +173,10 @@ management, configured root resolution, service-limit enforcement, cancellation,
 and worker termination. The supervisor capability model is defined in
 [section 6](#6-security-model).
 
-Workers execute filesystem operations after UID, primary GID, and supplementary
-group switching. Each worker must be bound to one resolved local identity for
-its lifetime, must drop all capabilities before filesystem execution, and must
-execute only operations received through its socket pair.
+Workers must execute filesystem operations after UID, primary GID, and
+supplementary group switching. Each worker must be bound to one resolved local
+identity for its lifetime, must drop all capabilities before filesystem
+execution, and must execute only operations received through its socket pair.
 
 The worker pool bounds local identity contexts, worker processes, open file
 descriptors, streams, and active filesystem operations. When limits are reached,
@@ -197,7 +197,7 @@ Requests that exceed concurrency or worker availability limits must fail with
 `429 Too Many Requests`; worker creation failures caused by internal or
 operating-system failures must fail with `503 Service Unavailable`.
 
-### Worker Communication
+### 5.2 Worker Communication
 
 Supervisor and worker processes must communicate through per-worker Unix domain
 socket pairs created with `socketpair`. Unlike filesystem-named Unix sockets,
@@ -206,10 +206,10 @@ listener path, cannot be discovered by opening a pathname, and avoid lifecycle
 and permission risks in `/tmp`, configured roots, or other operator-facing
 directories.
 
-Socket pairs are preferred because they are local-only, bidirectional,
+Socket pairs should be used because they are local-only, bidirectional,
 compatible with async runtimes, and suitable for both short request/response
-operations and long-lived streaming responses. The supervisor creates each pair,
-passes one endpoint to the worker, and keeps the other endpoint.
+operations and long-lived streaming responses. The supervisor must create each
+pair, pass one endpoint to the worker, and keep the other endpoint.
 
 The IPC protocol should use bounded frames:
 
@@ -222,7 +222,7 @@ Shared task queues should not be used for worker IPC because they make
 per-request cancellation, backpressure, identity isolation, and stream ownership
 harder to reason about.
 
-### Worker Lifetime
+### 5.3 Worker Lifetime
 
 A worker may be reused only for requests that resolve to the same local
 identity. It remains eligible for reuse while it is idle and has not exceeded
@@ -232,8 +232,8 @@ identity. It remains eligible for reuse while it is idle and has not exceeded
 after its last completed operation. When the timeout expires, the supervisor
 should terminate the worker and release its resources.
 
-Active workers are not expired by `pool.idle_timeout`. Non-streaming
-operations are bounded by `pool.request_timeout`; if the timeout is
+Active workers must not be expired by `pool.idle_timeout`. Non-streaming
+operations must be bounded by `pool.request_timeout`; if the timeout is
 exceeded, the supervisor must cancel the operation and may terminate the worker
 if cancellation cannot complete cleanly.
 
@@ -249,9 +249,9 @@ or when the client disconnects. Detailed configuration keys are defined in
 
 ## 6. Security Model
 
-The supervisor is designed to start without root privileges. It must run under a
-dedicated service account and receive only the capabilities required for NetixFS
-operation:
+The supervisor must be able to start without root privileges. It must run under
+a dedicated service account and receive only the capabilities required for
+NetixFS operation:
 
 - `CAP_SETUID`: required to create workers running as resolved local UIDs;
 - `CAP_SETGID`: required to set the worker primary GID and supplementary groups;
@@ -265,24 +265,25 @@ The supervisor must not require broad filesystem-bypass capabilities, including
 Deployments that cannot provide the required capability model must fail closed
 rather than running the supervisor as root.
 
-The external identity provider is responsible for authenticating users and
-issuing JWTs. NetixFS validates token signatures and configured token claims,
-but it does not maintain a user database and does not authenticate passwords,
-sessions, or interactive login flows.
+The external identity provider must be responsible for authenticating users and
+issuing JWTs. NetixFS must validate token signatures and configured token
+claims, but it must not maintain a user database and must not authenticate
+passwords, sessions, or interactive login flows.
 
-The local Linux identity is derived from the configured JWT username claim and
-resolved through NSS. Numeric UID, GID, or group claims from JWTs are not
-authoritative. Local UID, primary GID, and supplementary groups must come from
-the host identity system.
+The local Linux identity must be derived from the configured JWT username claim
+and resolved through NSS. Numeric UID, GID, or group claims from JWTs must not
+be authoritative. Local UID, primary GID, and supplementary groups must come
+from the host identity system.
 
-Filesystem authorization is delegated to the Linux kernel. Workers execute under
-the resolved local UID, primary GID, and supplementary groups, so kernel
-permission checks remain the final authorization decision for filesystem access.
+Filesystem authorization must be delegated to the Linux kernel. Workers must
+execute under the resolved local UID, primary GID, and supplementary groups, so
+kernel permission checks remain the final authorization decision for filesystem
+access.
 
-Operators decide which filesystem roots may be exposed. NetixFS must not impose
-hardcoded restrictions on those roots, but every request must remain inside one
-configured root and must pass path normalization, symlink, mount-boundary, and
-resource-limit checks before filesystem access.
+Operators must decide which filesystem roots may be exposed. NetixFS must not
+impose hardcoded restrictions on those roots, but every request must remain
+inside one configured root and must pass path normalization, symlink,
+mount-boundary, and resource-limit checks before filesystem access.
 
 NetixFS must support both native TLS and deployment behind an upstream
 TLS-terminating proxy. When native TLS is disabled, transport security becomes
@@ -382,7 +383,7 @@ including:
 The API must be explicit, stable, and machine-friendly. Filesystem endpoints are
 exposed under the route prefix shown below.
 
-### Root Scopes
+### 10.1 Root Scopes
 
 Filesystem endpoints are scoped to a configured root identifier:
 
@@ -397,7 +398,7 @@ configured root boundary, path normalization rules, authentication, local POSIX
 permissions, and service safety limits. Filesystem paths must not be embedded as
 arbitrary URL path segments.
 
-### Path Normalization
+### 10.2 Path Normalization
 
 Every operation that targets a filesystem path must provide that path as a query
 parameter or JSON field using one of the following representations:
@@ -446,7 +447,7 @@ support non-UTF-8 paths through `path_b64`. JSON responses that include path
 values should include both a UTF-8 `path` field when lossless UTF-8 conversion is
 possible and a `path_b64` field when raw byte preservation is required.
 
-### File Content
+### 10.3 File Content
 
 File contents should be transferred with the appropriate media type when NetixFS
 can determine it. When the media type cannot be determined safely, NetixFS must
@@ -471,7 +472,7 @@ If the client sends a restrictive `Accept` header that excludes the detected or
 fallback media type, NetixFS may return `406 Not Acceptable`. Clients that can
 handle any file content should omit `Accept` or send `Accept: */*`.
 
-### Preconditions
+### 10.4 Preconditions
 
 Conditional write requests should support standard HTTP precondition headers
 where useful. These headers let clients avoid overwriting a file or directory
@@ -510,7 +511,7 @@ and hashing the full file contents. NetixFS must not promise stronger
 consistency than Linux and the mounted filesystem provide, and should document
 that metadata-derived ETags can have filesystem-specific edge cases.
 
-### API Errors
+### 10.5 API Errors
 
 All filesystem API endpoints may return the following common errors unless an
 endpoint documents a more specific rule:
@@ -1167,15 +1168,6 @@ Endpoint-specific errors:
   mount-boundary policy rejects traversal.
 - `412 Precondition Failed`: a supplied HTTP precondition fails.
 
-Recursive directory removal and recursive copy must be controlled by
-configuration. Non-recursive removal must fail when the directory is not empty.
-Directory listing must enforce configured entry limits and return a cursor
-instead of loading unbounded entries into memory.
-
-All filesystem operations are synchronous HTTP requests. Recursive operations,
-when enabled, must obey configured request timeouts and resource limits. NetixFS
-does not expose a background job API.
-
 ### 11.3 File API
 
 File API endpoints must transfer file contents as text when the content is
@@ -1289,8 +1281,8 @@ Streaming must satisfy the following requirements:
 - NetixFS should use Linux `inotify` to wait for file changes instead of
   polling. Polling may only be used as a documented fallback when `inotify`
   cannot be used for a specific filesystem or deployment environment.
-- Backpressure from the HTTP connection must propagate to file reading so NetixFS
-  does not buffer unbounded data per client.
+- Backpressure from the HTTP connection must propagate to file reading, and
+  NetixFS must not buffer unbounded data per client.
 - Configured maximum concurrent streams, per-stream idle timeout, maximum stream
   duration, and optional heartbeat behavior must be enforced.
 - If an error occurs before response headers are sent, NetixFS must return a
@@ -1713,9 +1705,9 @@ NetixFS must support configuration through:
 - environment variables;
 - command-line arguments.
 
-### Source Ordering
+### 12.1 Source Ordering
 
-Configuration precedence is, from lowest to highest:
+Configuration precedence must be, from lowest to highest:
 
 1. TOML configuration file;
 2. environment variables;
@@ -1734,7 +1726,7 @@ The path to the TOML configuration file should be configurable with
 NetixFS should either use documented defaults or fail fast when a required
 setting has no value.
 
-### 12.1 Configuration Settings
+### 12.2 Configuration Settings
 
 For each setting, `Mandatory: Yes` means NetixFS cannot start without a value
 for that setting or for the documented setting group.
@@ -1744,8 +1736,8 @@ for that setting or for the documented setting group.
 ##### Configuration file path
 
 Selects the TOML configuration file to load before environment variables and
-command-line overrides are applied. If omitted, NetixFS uses built-in defaults
-and fails fast for mandatory settings without values.
+command-line overrides are applied. If omitted, NetixFS must use built-in
+defaults and fail fast for mandatory settings without values.
 
 - TOML setting: not applicable.
 - Command-line argument: `--config-file`.
@@ -1784,7 +1776,7 @@ Controls the TCP port for the main HTTP listener. Ports below 1024 require
 ##### Public base URL
 
 Defines the externally visible base URL used in generated links,
-documentation, redirects if any, and operator-facing diagnostics. It does not
+documentation, redirects if any, and operator-facing diagnostics. It must not
 control the listener address.
 
 - TOML setting: `server.public_base_url`.
@@ -1888,8 +1880,8 @@ preferred mode for automatic key rotation.
 
 Defines the expected token issuer. When this setting is present, issuer
 validation is enabled and every accepted token must contain a matching `iss`
-claim. When this setting is absent, NetixFS does not validate the token issuer.
-A mismatch rejects the token before identity mapping or filesystem access.
+claim. When this setting is absent, NetixFS must not validate the token issuer.
+A mismatch must reject the token before identity mapping or filesystem access.
 
 - TOML setting: `auth.jwt.issuer`.
 - Command-line argument: `--jwt-issuer`.
@@ -1902,8 +1894,8 @@ A mismatch rejects the token before identity mapping or filesystem access.
 
 Defines the expected token audience. When this setting is present, audience
 validation is enabled and every accepted token must contain a matching `aud`
-claim. When this setting is absent, NetixFS does not validate the token
-audience. A mismatch rejects tokens minted for another service.
+claim. When this setting is absent, NetixFS must not validate the token
+audience. A mismatch must reject tokens minted for another service.
 
 - TOML setting: `auth.jwt.audience`.
 - Command-line argument: `--jwt-audience`.
@@ -2346,18 +2338,18 @@ NetixFS should provide production-grade observability through structured logs,
 request IDs, audit logs, metrics, health/readiness endpoints, and runtime
 configuration introspection.
 
-### Request IDs
+### 13.1 Request IDs
 
 Every request must have a request ID. If the caller supplies `X-Request-Id`,
 NetixFS should preserve it after validating that it is safe to log. Otherwise,
 NetixFS must generate one. Error responses must include the request ID in the
 structured error body.
 
-### Logs
+### 13.2 Logs
 
-Operational logs are for running and debugging NetixFS. They should answer what
-happened inside the service, such as request completion, worker creation, JWT key
-refresh failures, stream disconnects, timeouts, and internal errors.
+Operational logs must support running and debugging NetixFS. They should answer
+what happened inside the service, such as request completion, worker creation,
+JWT key refresh failures, stream disconnects, timeouts, and internal errors.
 
 Logs must be structured when `logging.format=json`. Each log event should
 include at least:
@@ -2395,11 +2387,11 @@ Example request log:
 }
 ```
 
-### Audit Logs
+### 13.3 Audit Logs
 
-Audit logs are for accountability and security review. They should answer who
-attempted or performed a security-relevant action, what target was involved, and
-whether the action succeeded or was rejected. Audit logs may use the same
+Audit logs must support accountability and security review. They should answer
+who attempted or performed a security-relevant action, what target was involved,
+and whether the action succeeded or was rejected. Audit logs may use the same
 logging backend and structured JSON format as operational logs, but their schema
 should be more stable, they should be harder to disable accidentally, and they
 should usually have longer retention.
@@ -2434,7 +2426,7 @@ Example audit log:
 }
 ```
 
-### Metrics
+### 13.4 Metrics
 
 Metrics should include request counts, latencies, error counts, active requests,
 worker pool size, worker creation failures, active streams, stream disconnects,
@@ -2473,7 +2465,7 @@ Metrics labels must avoid high-cardinality or sensitive values such as raw
 paths, subjects, request IDs, or file names. Route labels should use route
 templates such as `/api/v1/roots/{root_id}/file`, not concrete request paths.
 
-### Health And Readiness
+### 13.5 Health And Readiness
 
 Health and readiness endpoints must not require authentication unless the
 deployment explicitly enables authenticated probes.
@@ -2498,10 +2490,10 @@ Content-Type: application/json
 }
 ```
 
-`/readyz` should return `200 OK` only when NetixFS can accept useful traffic. It
-should check configuration load status, JWT key availability, metrics and worker
-pool initialization, and whether required service limits are valid. It may also
-include degraded warnings for non-fatal conditions.
+`/readyz` should return `200 OK` only when NetixFS is able to accept useful
+traffic. It should check configuration load status, JWT key availability,
+metrics and worker pool initialization, and whether required service limits are
+valid. It may also include degraded warnings for non-fatal conditions.
 
 Example readiness response:
 
@@ -2538,7 +2530,7 @@ Content-Type: application/json
 }
 ```
 
-### Runtime Configuration
+### 13.6 Runtime Configuration
 
 NetixFS should expose an operator-facing endpoint for inspecting the effective
 runtime configuration:
@@ -2690,49 +2682,50 @@ filesystems, not only unit tests.
 
 ## 16. Implementation Plan
 
-Implementation should proceed in successive steps, ordered from a minimal
-working prototype to full specification coverage.
+The following sequence is a proposed implementation roadmap, ordered from a
+minimal working prototype to full specification coverage. It is guidance for
+planning work and is not itself a conformance requirement.
 
 1. Minimal HTTP skeleton:
-   Implement configuration loading, command-line and environment overrides,
+   Start with configuration loading, command-line and environment overrides,
    `/healthz`, `/readyz`, structured JSON errors, request IDs, and basic
-   structured logs. At this stage, filesystem APIs may be stubbed.
+   structured logs. At this stage, filesystem APIs can remain stubbed.
 
 2. Authentication and identity resolution:
    Add JWT validation, issuer and audience validation when configured, username
    claim extraction with `sub` as the default, and local identity resolution
-   through NSS. Requests whose identity cannot be resolved must fail before
+   through NSS. Use this step to verify that unresolved identities fail before
    filesystem access.
 
 3. Root and path safety layer:
-   Implement configured roots, `root_id` routing, `path` and `path_b64`
+   Add configured roots, `root_id` routing, `path` and `path_b64`
    handling, path normalization, rejection of unsafe path components, and root
-   containment checks. Add Linux integration tests for traversal and containment
-   behavior.
+   containment checks. Include Linux integration tests for traversal and
+   containment behavior.
 
 4. Supervisor/worker execution model:
-   Implement the non-root supervisor, capability requirements, worker creation,
+   Add the non-root supervisor, capability requirements, worker creation,
    per-worker Unix domain socket pairs, framed IPC, worker identity switching,
    and the rule that each worker is bound to one resolved local identity for its
    lifetime.
 
 5. Read-only filesystem APIs:
-   Implement Stat API, Directory API listing with limits and cursors, file reads
+   Add Stat API, Directory API listing with limits and cursors, file reads
    with range support, symbolic link reads, and xattr reads where supported.
-   Enforce configured symlink and mount-boundary policy.
+   Cover configured symlink and mount-boundary policy in this phase.
 
 6. Core write APIs:
-   Implement create or replace file with mandatory atomic replacement, truncate,
-   delete file, create directory, remove empty directory, rename, and copy.
-   Enforce read-only mode, request body limits, and structured error mapping.
+   Add create or replace file with atomic replacement, truncate, delete file,
+   create directory, remove empty directory, rename, and copy. Cover read-only
+   mode, request body limits, and structured error mapping.
 
 7. Worker pool and backpressure:
-   Implement worker pool limits, idle expiration, request timeout handling,
+   Add worker pool limits, idle expiration, request timeout handling,
    cancellation, bounded pending work, stream limits, and `429` / `503` behavior
    when capacity is exhausted or workers cannot be created.
 
 8. Streaming:
-   Implement text-only stream support with `tail -f` descriptor-following
+   Add text-only stream support with `tail -f` descriptor-following
    semantics, inotify-based change detection where available, truncation and
    replacement behavior, stream cancellation, backpressure, idle timeout,
    maximum duration, and optional heartbeat behavior.
@@ -2742,16 +2735,16 @@ working prototype to full specification coverage.
    and symbolic-link creation.
 
 10. ETags and HTTP preconditions:
-    Implement ETag generation for filesystem objects, conditional write handling
+    Add ETag generation for filesystem objects, conditional write handling
     with `If-Match`, `If-None-Match`, and `If-Unmodified-Since`, and
-    `412 Precondition Failed` behavior. Add tests for stale writes,
+    `412 Precondition Failed` behavior. Include tests for stale writes,
     create-if-absent workflows, truncation guards, and filesystem metadata edge
     cases.
 
 11. Observability and operations hardening:
-    Complete operational logs, audit logs, metrics, health and readiness
-    behavior, path redaction, configuration validation, and
-    operator-facing failure messages.
+    Round out operational logs, audit logs, metrics, health and readiness
+    behavior, path redaction, configuration validation, and operator-facing
+    failure messages.
 
 12. Full specification verification:
     Add end-to-end Linux integration tests for permission behavior, symlink
