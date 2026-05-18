@@ -21,6 +21,8 @@ interface that is easy to integrate into applications.
   files, directories, metadata, and streams.
 - Support both read and write workflows, with streaming similar to `tail -f`.
 - Preserve POSIX permission semantics as much as possible.
+- Work on shared filesystems that use root squash, where root privileges are not
+  sufficient for end-user filesystem access.
 - Minimize the operational risk of exposing filesystem operations over the
   network.
 - Provide deployment and configuration that remain simple enough for service
