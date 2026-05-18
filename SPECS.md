@@ -307,10 +307,10 @@ Validation requirements include:
 NetixFS must support both local paths and remote URLs for JWT verification key
 sources. Supported key sources are:
 
-- static public key from a local file path;
-- static public key from a remote URL;
-- JWKS from a local file path;
-- JWKS from a remote URL.
+- static public key from a local file path: `auth.jwt.public_key_path`;
+- static public key from a remote URL: `auth.jwt.public_key_url`;
+- JWKS from a local file path: `auth.jwt.jwks_path`;
+- JWKS from a remote URL: `auth.jwt.jwks_url`.
 
 When both a static public key source and a JWKS source are configured, NetixFS
 must use JWKS. JWKS is preferred because it supports multiple keys and smoother
@@ -380,10 +380,17 @@ including:
 
 ## 10. HTTP API Design
 
-The API must be explicit, stable, and machine-friendly. Filesystem endpoints are
-exposed under the route prefix shown below.
+The API must be explicit, stable, and machine-friendly.
 
-### 10.1 Root Scopes
+### 10.1 API Version Prefix
+
+All versioned HTTP API routes must use the `/api/v1` prefix. The prefix is part
+of the stable route contract and reserves space for future incompatible API
+versions without changing the host, listener, or deployment topology. Endpoints
+outside the versioned API, such as health, readiness, metrics, and diagnostics
+endpoints, are not required to use this prefix.
+
+### 10.2 Root Scopes
 
 Filesystem endpoints are scoped to a configured root identifier:
 
@@ -398,7 +405,7 @@ configured root boundary, path normalization rules, authentication, local POSIX
 permissions, and service safety limits. Filesystem paths must not be embedded as
 arbitrary URL path segments.
 
-### 10.2 Path Normalization
+### 10.3 Path Normalization
 
 Every operation that targets a filesystem path must provide that path as a query
 parameter or JSON field using one of the following representations:
@@ -447,7 +454,7 @@ support non-UTF-8 paths through `path_b64`. JSON responses that include path
 values should include both a UTF-8 `path` field when lossless UTF-8 conversion is
 possible and a `path_b64` field when raw byte preservation is required.
 
-### 10.3 File Content
+### 10.4 File Content
 
 File contents should be transferred with the appropriate media type when NetixFS
 can determine it. When the media type cannot be determined safely, NetixFS must
@@ -472,7 +479,7 @@ If the client sends a restrictive `Accept` header that excludes the detected or
 fallback media type, NetixFS may return `406 Not Acceptable`. Clients that can
 handle any file content should omit `Accept` or send `Accept: */*`.
 
-### 10.4 Preconditions
+### 10.5 Preconditions
 
 Conditional write requests should support standard HTTP precondition headers
 where useful. These headers let clients avoid overwriting a file or directory
@@ -511,7 +518,7 @@ and hashing the full file contents. NetixFS must not promise stronger
 consistency than Linux and the mounted filesystem provide, and should document
 that metadata-derived ETags can have filesystem-specific edge cases.
 
-### 10.5 API Errors
+### 10.6 API Errors
 
 All filesystem API endpoints may return the following common errors unless an
 endpoint documents a more specific rule:
