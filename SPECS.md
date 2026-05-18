@@ -45,34 +45,36 @@ Unsafe Rust should be minimal and justified for each unsafe block.
 
 NetixFS is Linux-only. It should work on currently supported Linux kernels and
 Linux distributions, meaning kernels and distributions that still receive
-upstream or vendor security updates. Runtime assumptions are detailed in section
-4.
+upstream or vendor security updates. Runtime assumptions are detailed in
+[section 4](#4-system-requirements).
 
 ### Security And Identity
 
 NetixFS validates JWTs itself before performing filesystem operations. It maps
 the configured JWT username claim to a local Linux UID, primary GID, and
 supplementary groups through NSS. Authentication requirements are detailed in
-section 7, and identity mapping is detailed in section 8.
+[section 7](#7-authentication-boundary), and identity mapping is detailed in
+[section 8](#8-identity-mapping).
 
 ### Execution Model
 
-NetixFS uses the supervisor/worker model defined in section 5. The supervisor
-handles the HTTP API, authentication, identity resolution, request validation,
-routing, cancellation, and worker lifecycle management. Workers execute
-filesystem operations under the resolved UID, primary GID, and supplementary
-groups.
+NetixFS uses the supervisor/worker model defined in
+[section 5](#5-software-architecture). The supervisor handles the HTTP API,
+authentication, identity resolution, request validation, routing, cancellation,
+and worker lifecycle management. Workers execute filesystem operations under the
+resolved UID, primary GID, and supplementary groups.
 
 The worker pool is bounded, and each worker process is bound to one resolved
 local identity for its lifetime. Worker pool limits and backpressure behavior
-are detailed in section 5.
+are detailed in [section 5](#5-software-architecture).
 
 ### Configuration
 
 NetixFS supports configuration through a TOML configuration file, environment
 variables, and command-line arguments. Configuration precedence is, from lowest
 to highest: TOML configuration file, environment variables, then command-line
-arguments. Configuration settings are detailed in section 12.
+arguments. Configuration settings are detailed in
+[section 12](#12-configuration).
 
 ### Deployment
 
@@ -147,21 +149,29 @@ flowchart TD
 Before dispatching to a worker, the supervisor must complete every check that
 does not require filesystem access as the target user:
 
-- authentication and JWT claim validation, as defined in section 7;
-- username extraction and NSS identity resolution, as defined in section 8;
-- root selection and path normalization, as defined in section 10;
+- authentication and JWT claim validation, as defined in
+  [section 7](#7-authentication-boundary);
+- username extraction and NSS identity resolution, as defined in
+  [section 8](#8-identity-mapping);
+- root selection and path normalization, as defined in
+  [section 10](#10-http-api-design);
 - authorization and containment checks that are safe to perform before worker
-  execution, as defined in sections 9 and 10;
+  execution, as defined in [section 9](#9-authorization-model) and
+  [section 10](#10-http-api-design);
 - request body, directory, stream, concurrency, and worker pool limits, as
-  defined in sections 5, 10, 11, and 12;
+  defined in [section 5](#5-software-architecture),
+  [section 10](#10-http-api-design), [section 11](#11-http-api-endpoints), and
+  [section 12](#12-configuration);
 - worker selection or creation for the resolved local identity;
 - cancellation, timeout, backpressure, and logging context, as defined in
-  sections 5 and 13.
+  [section 5](#5-software-architecture) and
+  [section 13](#13-observability).
 
 The supervisor must not perform client-requested filesystem operations directly.
 It may only perform setup and control-plane work: worker creation, IPC
 management, configured root resolution, service-limit enforcement, cancellation,
-and worker termination. The supervisor capability model is defined in section 6.
+and worker termination. The supervisor capability model is defined in
+[section 6](#6-security-model).
 
 Workers execute filesystem operations after UID, primary GID, and supplementary
 group switching. Each worker must be bound to one resolved local identity for
@@ -235,7 +245,7 @@ ends, the worker becomes idle again and is subject to
 Workers must release file descriptors, inotify watches, IPC buffers, and other
 resources when an operation completes, when the supervisor cancels the request,
 or when the client disconnects. Detailed configuration keys are defined in
-section 12.
+[section 12](#12-configuration).
 
 ## 6. Security Model
 
@@ -818,8 +828,9 @@ and name. Entries must include the inode number. Entries should also include
 numeric UID and GID when available.
 Symbolic link entries must include the link target without following the link.
 Regular file entries must include `mime_type`, using the same MIME detection
-rules defined in section 10. When NetixFS cannot determine a more specific media
-type for a regular file, `mime_type` must be `application/octet-stream`.
+rules defined in [section 10](#10-http-api-design). When NetixFS cannot
+determine a more specific media type for a regular file, `mime_type` must be
+`application/octet-stream`.
 
 Directory listings must not include `.` or `..` inside the `entries` array.
 Instead, the response must include separate `current` and `parent` objects.
