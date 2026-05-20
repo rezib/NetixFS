@@ -10,12 +10,18 @@
 //! `PartialConfig::resolve` converts them into the fully-typed `Config` and its
 //! sub-structs, applying defaults and validating mandatory constraints.
 
+use bytesize::ByteSize;
 use clap::{Args, Parser};
-use eyre::{Result, WrapErr, bail};
+use eyre::{Result, WrapErr, bail, eyre};
+use humantime::parse_duration;
 use serde::Deserialize;
+use serde_with::DeserializeFromStr;
 use std::{
+    fs::Permissions,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
+    str::FromStr,
     time::Duration,
 };
 
@@ -67,10 +73,68 @@ pub(crate) enum SymlinkPolicy {
 // Fully-resolved structs (no Options, fully typed)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeserializeFromStr)]
 pub(crate) struct Root {
     pub id: String,
     pub path: PathBuf,
+}
+
+impl FromStr for Root {
+    type Err = eyre::Error;
+
+    /// Parse a filesystem root entry in `"id=path"` format.
+    ///
+    /// Both the `id` and `path` portions must be non-empty.
+    fn from_str(s: &str) -> Result<Root> {
+        let (id, path) = s
+            .split_once('=')
+            .ok_or_else(|| eyre!("invalid root {:?}: expected \"id=path\" format", s))?;
+        let id = id.trim().to_string();
+        let path = path.trim();
+        if id.is_empty() {
+            bail!("root id must not be empty in {:?}", s);
+        }
+        if path.is_empty() {
+            bail!("root path must not be empty in {:?}", s);
+        }
+        Ok(Root {
+            id,
+            path: PathBuf::from(path),
+        })
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, DeserializeFromStr)]
+pub struct FileMode(u32);
+
+impl From<FileMode> for Permissions {
+    fn from(mode: FileMode) -> Self {
+        Permissions::from_mode(mode.0)
+    }
+}
+
+impl FileMode {
+    pub fn value(self) -> u32 {
+        self.0
+    }
+}
+
+impl FromStr for FileMode {
+    type Err = eyre::Error;
+
+    /// Parse a Unix file-mode string as octal.
+    ///
+    /// Accepted formats: `"0644"`, `"644"`, `"0o644"`.
+    /// All are interpreted in base-8.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let s = s.trim();
+        // Strip the Rust-style "0o" prefix when present; `from_str_radix` then
+        // handles any remaining leading zeros as ordinary octal digits.
+        let digits = s.strip_prefix("0o").unwrap_or(s);
+        u32::from_str_radix(digits, 8)
+            .map(Self)
+            .wrap_err_with(|| format!("invalid Unix mode {:?}: expected octal e.g. \"0644\"", s))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,9 +178,9 @@ pub(crate) struct TlsConfig {
 pub(crate) struct FilesystemConfig {
     pub allowed_roots: Vec<Root>,
     pub read_only: bool,
-    pub default_file_mode: u32,
-    pub default_dir_mode: u32,
-    pub umask: Option<u32>,
+    pub default_file_mode: FileMode,
+    pub default_dir_mode: FileMode,
+    pub umask: Option<FileMode>,
     pub symlink_policy: SymlinkPolicy,
     pub allow_mount_crossing: bool,
 }
@@ -132,8 +196,8 @@ pub(crate) struct OperationsConfig {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LimitsConfig {
-    pub max_request_body_size: u64,
-    pub max_read_size: u64,
+    pub max_request_body_size: ByteSize,
+    pub max_read_size: ByteSize,
     pub max_directory_entries: u32,
     pub max_concurrent_requests: u32,
     pub max_concurrent_streams: u32,
@@ -257,9 +321,11 @@ pub(crate) struct JwtPartial {
 
     #[arg(
         long = "jwt-remote-key-refresh-interval",
-        env = "NETIXFS_AUTH_JWT_REMOTE_KEY_REFRESH_INTERVAL"
+        env = "NETIXFS_AUTH_JWT_REMOTE_KEY_REFRESH_INTERVAL",
+        value_parser = parse_duration
     )]
-    pub remote_key_refresh_interval: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub remote_key_refresh_interval: Option<Duration>,
 }
 
 // ── [auth] ────────────────────────────────────────────────────────────────────
@@ -282,7 +348,7 @@ pub(crate) struct FilesystemPartial {
         env = "NETIXFS_FILESYSTEM_ALLOWED_ROOTS",
         value_delimiter = ','
     )]
-    pub allowed_roots: Vec<String>,
+    pub allowed_roots: Vec<Root>,
 
     #[arg(long = "read-only", env = "NETIXFS_FILESYSTEM_READ_ONLY")]
     pub read_only: Option<bool>,
@@ -292,15 +358,15 @@ pub(crate) struct FilesystemPartial {
         long = "default-file-mode",
         env = "NETIXFS_FILESYSTEM_DEFAULT_FILE_MODE"
     )]
-    pub default_file_mode: Option<String>,
+    pub default_file_mode: Option<FileMode>,
 
     /// Octal mode string, e.g. "0755".
     #[arg(long = "default-dir-mode", env = "NETIXFS_FILESYSTEM_DEFAULT_DIR_MODE")]
-    pub default_dir_mode: Option<String>,
+    pub default_dir_mode: Option<FileMode>,
 
     /// Octal umask string, e.g. "0022". Defaults to the process umask (None).
     #[arg(long = "umask", env = "NETIXFS_FILESYSTEM_UMASK")]
-    pub umask: Option<String>,
+    pub umask: Option<FileMode>,
 
     #[arg(long = "symlink-policy", env = "NETIXFS_FILESYSTEM_SYMLINK_POLICY")]
     pub symlink_policy: Option<SymlinkPolicy>,
@@ -350,11 +416,11 @@ pub(crate) struct LimitsPartial {
         long = "max-request-body-size",
         env = "NETIXFS_LIMITS_MAX_REQUEST_BODY_SIZE"
     )]
-    pub max_request_body_size: Option<String>,
+    pub max_request_body_size: Option<ByteSize>,
 
     /// Human-readable byte size, e.g. "100MiB".
     #[arg(long = "max-read-size", env = "NETIXFS_LIMITS_MAX_READ_SIZE")]
-    pub max_read_size: Option<String>,
+    pub max_read_size: Option<ByteSize>,
 
     #[arg(
         long = "max-directory-entries",
@@ -383,20 +449,25 @@ pub(crate) struct StreamingPartial {
     #[arg(
         id = "stream-idle-timeout",
         long = "stream-idle-timeout",
-        env = "NETIXFS_STREAMING_IDLE_TIMEOUT"
+        env = "NETIXFS_STREAMING_IDLE_TIMEOUT",
+        value_parser = parse_duration
     )]
-    pub idle_timeout: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub idle_timeout: Option<Duration>,
 
     /// Human-readable duration, e.g. "1h".
-    #[arg(long = "stream-max-duration", env = "NETIXFS_STREAMING_MAX_DURATION")]
-    pub max_duration: Option<String>,
+    #[arg(long = "stream-max-duration", env = "NETIXFS_STREAMING_MAX_DURATION", value_parser = parse_duration)]
+    #[serde(with = "humantime_serde")]
+    pub max_duration: Option<Duration>,
 
     /// Human-readable duration, e.g. "30s".
     #[arg(
         long = "stream-heartbeat-interval",
-        env = "NETIXFS_STREAMING_HEARTBEAT_INTERVAL"
+        env = "NETIXFS_STREAMING_HEARTBEAT_INTERVAL",
+        value_parser = parse_duration
     )]
-    pub heartbeat_interval: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Option<Duration>,
 }
 
 // ── [pool] ────────────────────────────────────────────────────────────────────
@@ -410,13 +481,16 @@ pub(crate) struct PoolPartial {
     #[arg(
         id = "pool-idle-timeout",
         long = "pool-idle-timeout",
-        env = "NETIXFS_POOL_IDLE_TIMEOUT"
+        env = "NETIXFS_POOL_IDLE_TIMEOUT",
+        value_parser = parse_duration
     )]
-    pub idle_timeout: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub idle_timeout: Option<Duration>,
 
     /// Human-readable duration, e.g. "30s".
-    #[arg(long = "pool-request-timeout", env = "NETIXFS_POOL_REQUEST_TIMEOUT")]
-    pub request_timeout: Option<String>,
+    #[arg(long = "pool-request-timeout", env = "NETIXFS_POOL_REQUEST_TIMEOUT", value_parser = parse_duration)]
+    #[serde(with = "humantime_serde")]
+    pub request_timeout: Option<Duration>,
 }
 
 // ── [logging] ─────────────────────────────────────────────────────────────────
@@ -749,121 +823,6 @@ fn merge(cli_env: PartialConfig, file: PartialConfig) -> PartialConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parse helpers (private)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Parse a human-readable duration string.
-///
-/// Accepted formats: `"0"`, `"30s"`, `"5m"`, `"1h"`, `"100ms"`.
-fn parse_duration(s: &str) -> Result<Duration> {
-    let s = s.trim();
-    if s == "0" {
-        return Ok(Duration::ZERO);
-    }
-    // Check "ms" before "s" so "100ms" is not mistakenly stripped of its "s".
-    if let Some(n) = s.strip_suffix("ms") {
-        let v: u64 = n
-            .trim()
-            .parse()
-            .wrap_err_with(|| format!("invalid millisecond count in duration {:?}", s))?;
-        return Ok(Duration::from_millis(v));
-    }
-    if let Some(n) = s.strip_suffix('s') {
-        let v: u64 = n
-            .trim()
-            .parse()
-            .wrap_err_with(|| format!("invalid second count in duration {:?}", s))?;
-        return Ok(Duration::from_secs(v));
-    }
-    if let Some(n) = s.strip_suffix('m') {
-        let v: u64 = n
-            .trim()
-            .parse()
-            .wrap_err_with(|| format!("invalid minute count in duration {:?}", s))?;
-        return Ok(Duration::from_secs(v * 60));
-    }
-    if let Some(n) = s.strip_suffix('h') {
-        let v: u64 = n
-            .trim()
-            .parse()
-            .wrap_err_with(|| format!("invalid hour count in duration {:?}", s))?;
-        return Ok(Duration::from_secs(v * 3_600));
-    }
-    bail!(
-        "invalid duration {:?}: expected e.g. \"0\", \"30s\", \"5m\", \"1h\", \"100ms\"",
-        s
-    )
-}
-
-/// Parse a human-readable byte-size string.
-///
-/// Accepted formats: `"1024"`, `"1024B"`, `"1KiB"`, `"100MiB"`, `"1GiB"`,
-/// `"1KB"`, `"100MB"`, `"1GB"`.
-fn parse_byte_size(s: &str) -> Result<u64> {
-    let s = s.trim();
-    // Longest suffixes first so that e.g. "GiB" is matched before "B".
-    const SUFFIXES: &[(&str, u64)] = &[
-        ("GiB", 1u64 << 30),
-        ("MiB", 1u64 << 20),
-        ("KiB", 1u64 << 10),
-        ("GB", 1_000_000_000u64),
-        ("MB", 1_000_000u64),
-        ("KB", 1_000u64),
-        ("B", 1u64),
-    ];
-    for &(suffix, factor) in SUFFIXES {
-        if let Some(n) = s.strip_suffix(suffix) {
-            let v: u64 = n
-                .trim()
-                .parse()
-                .wrap_err_with(|| format!("invalid numeric prefix in byte-size {:?}", s))?;
-            return Ok(v * factor);
-        }
-    }
-    // No recognised suffix → treat the whole string as a plain byte count.
-    s.parse::<u64>().wrap_err_with(|| {
-        format!(
-            "invalid byte size {:?}: expected e.g. \"100MiB\", \"1GiB\", \"1024\"",
-            s
-        )
-    })
-}
-
-/// Parse a Unix file-mode string as octal.
-///
-/// Accepted formats: `"0644"`, `"644"`, `"0o644"`.
-/// All are interpreted in base-8.
-fn parse_unix_mode(s: &str) -> Result<u32> {
-    let s = s.trim();
-    // Strip the Rust-style "0o" prefix when present; `from_str_radix` then
-    // handles any remaining leading zeros as ordinary octal digits.
-    let digits = s.strip_prefix("0o").unwrap_or(s);
-    u32::from_str_radix(digits, 8)
-        .wrap_err_with(|| format!("invalid Unix mode {:?}: expected octal e.g. \"0644\"", s))
-}
-
-/// Parse a filesystem root entry in `"id=path"` format.
-///
-/// Both the `id` and `path` portions must be non-empty.
-fn parse_root(s: &str) -> Result<Root> {
-    let (id, path) = s
-        .split_once('=')
-        .ok_or_else(|| eyre::eyre!("invalid root {:?}: expected \"id=path\" format", s))?;
-    let id = id.trim().to_string();
-    let path = path.trim();
-    if id.is_empty() {
-        bail!("root id must not be empty in {:?}", s);
-    }
-    if path.is_empty() {
-        bail!("root path must not be empty in {:?}", s);
-    }
-    Ok(Root {
-        id,
-        path: PathBuf::from(path),
-    })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // resolve / load
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -904,18 +863,18 @@ impl PartialConfig {
         };
 
         // ── Auth / JWT ────────────────────────────────────────────────────────
-        let jp = &self.auth.jwt;
+        let jwt = &self.auth.jwt;
         let mut sources: Vec<JwtKeySource> = Vec::new();
-        if let Some(p) = jp.public_key_path.clone() {
+        if let Some(p) = jwt.public_key_path.clone() {
             sources.push(JwtKeySource::PublicKeyPath(p));
         }
-        if let Some(u) = jp.public_key_url.clone() {
+        if let Some(u) = jwt.public_key_url.clone() {
             sources.push(JwtKeySource::PublicKeyUrl(u));
         }
-        if let Some(p) = jp.jwks_path.clone() {
+        if let Some(p) = jwt.jwks_path.clone() {
             sources.push(JwtKeySource::JwksPath(p));
         }
-        if let Some(u) = jp.jwks_url.clone() {
+        if let Some(u) = jwt.jwks_url.clone() {
             sources.push(JwtKeySource::JwksUrl(u));
         }
         if sources.len() > 1 {
@@ -928,16 +887,15 @@ impl PartialConfig {
         }
         let jwt = JwtConfig {
             source: sources.into_iter().next(),
-            issuer: jp.issuer.clone(),
-            audience: jp.audience.clone(),
-            username_claim: jp
+            issuer: jwt.issuer.clone(),
+            audience: jwt.audience.clone(),
+            username_claim: jwt
                 .username_claim
                 .clone()
                 .unwrap_or_else(|| "sub".to_string()),
-            remote_key_refresh_interval: parse_duration(
-                jp.remote_key_refresh_interval.as_deref().unwrap_or("5m"),
-            )
-            .wrap_err("auth.jwt.remote_key_refresh_interval")?,
+            remote_key_refresh_interval: jwt
+                .remote_key_refresh_interval
+                .unwrap_or(Duration::from_mins(5)),
         };
         let auth = AuthConfig { jwt };
 
@@ -945,44 +903,13 @@ impl PartialConfig {
         if self.filesystem.allowed_roots.is_empty() {
             bail!("filesystem.allowed_roots: at least one root must be configured");
         }
-        let allowed_roots = self
-            .filesystem
-            .allowed_roots
-            .iter()
-            .map(|s| parse_root(s))
-            .collect::<Result<Vec<_>>>()
-            .wrap_err("filesystem.allowed_roots")?;
-
-        let default_file_mode = parse_unix_mode(
-            self.filesystem
-                .default_file_mode
-                .as_deref()
-                .unwrap_or("0644"),
-        )
-        .wrap_err("filesystem.default_file_mode")?;
-
-        let default_dir_mode = parse_unix_mode(
-            self.filesystem
-                .default_dir_mode
-                .as_deref()
-                .unwrap_or("0755"),
-        )
-        .wrap_err("filesystem.default_dir_mode")?;
-
-        let umask = self
-            .filesystem
-            .umask
-            .as_deref()
-            .map(parse_unix_mode)
-            .transpose()
-            .wrap_err("filesystem.umask")?;
 
         let filesystem = FilesystemConfig {
-            allowed_roots,
+            allowed_roots: self.filesystem.allowed_roots,
             read_only: self.filesystem.read_only.unwrap_or(false),
-            default_file_mode,
-            default_dir_mode,
-            umask,
+            default_file_mode: self.filesystem.default_file_mode.unwrap_or(FileMode(0o644)),
+            default_dir_mode: self.filesystem.default_dir_mode.unwrap_or(FileMode(0o755)),
+            umask: self.filesystem.umask,
             symlink_policy: self
                 .filesystem
                 .symlink_policy
@@ -1001,17 +928,11 @@ impl PartialConfig {
 
         // ── Limits ────────────────────────────────────────────────────────────
         let limits = LimitsConfig {
-            max_request_body_size: parse_byte_size(
-                self.limits
-                    .max_request_body_size
-                    .as_deref()
-                    .unwrap_or("100MiB"),
-            )
-            .wrap_err("limits.max_request_body_size")?,
-            max_read_size: parse_byte_size(
-                self.limits.max_read_size.as_deref().unwrap_or("100MiB"),
-            )
-            .wrap_err("limits.max_read_size")?,
+            max_request_body_size: self
+                .limits
+                .max_request_body_size
+                .unwrap_or(ByteSize::mib(100)),
+            max_read_size: self.limits.max_read_size.unwrap_or(ByteSize::mib(100)),
             max_directory_entries: self.limits.max_directory_entries.unwrap_or(10_000),
             max_concurrent_requests: self.limits.max_concurrent_requests.unwrap_or(1_024),
             max_concurrent_streams: self.limits.max_concurrent_streams.unwrap_or(128),
@@ -1019,26 +940,25 @@ impl PartialConfig {
 
         // ── Streaming ─────────────────────────────────────────────────────────
         let streaming = StreamingConfig {
-            idle_timeout: parse_duration(self.streaming.idle_timeout.as_deref().unwrap_or("5m"))
-                .wrap_err("streaming.idle_timeout")?,
-            max_duration: parse_duration(self.streaming.max_duration.as_deref().unwrap_or("1h"))
-                .wrap_err("streaming.max_duration")?,
-            heartbeat_interval: parse_duration(
-                self.streaming
-                    .heartbeat_interval
-                    .as_deref()
-                    .unwrap_or("30s"),
-            )
-            .wrap_err("streaming.heartbeat_interval")?,
+            idle_timeout: self
+                .streaming
+                .idle_timeout
+                .unwrap_or(Duration::from_mins(5)),
+            max_duration: self
+                .streaming
+                .max_duration
+                .unwrap_or(Duration::from_hours(1)),
+            heartbeat_interval: self
+                .streaming
+                .heartbeat_interval
+                .unwrap_or(Duration::from_secs(30)),
         };
 
         // ── Pool ──────────────────────────────────────────────────────────────
         let pool = PoolConfig {
             max_workers: self.pool.max_workers.unwrap_or(64),
-            idle_timeout: parse_duration(self.pool.idle_timeout.as_deref().unwrap_or("5m"))
-                .wrap_err("pool.idle_timeout")?,
-            request_timeout: parse_duration(self.pool.request_timeout.as_deref().unwrap_or("30s"))
-                .wrap_err("pool.request_timeout")?,
+            idle_timeout: self.pool.idle_timeout.unwrap_or(Duration::from_mins(5)),
+            request_timeout: self.pool.request_timeout.unwrap_or(Duration::from_secs(30)),
         };
 
         // ── Logging ───────────────────────────────────────────────────────────
