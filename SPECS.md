@@ -849,6 +849,40 @@ requested directory and its parent directory, and are not affected by `limit` or
 `cursor`. For a configured root directory, `parent` must be `null` because the
 API must not expose a directory above the selected root.
 
+Objects **`current`**, **`parent`** when present, and each element of **`entries`**
+must include a string field **`url`**: a ready-to-follow HTTP URL for the primary
+API resource for that row. Interpretation follows the existing **`type`** field:
+
+- **`directory`**: **`url`** is [`GET …/dir`](#list-directory) for that path.
+- **`file`**: **`url`** is [`GET …/file`](#read-file) for file contents.
+- **`symlink`**: **`url`** is [`GET …/symlink`](#read-symbolic-link) for symlink metadata JSON.
+
+Each **`url`** must be either:
+
+- **Absolute URL** when **`server.public_base_url`** is configured: scheme and
+  host must match **`public_base_url`**; the path and query encode the `/api/v1`
+  filesystem route (`/api/v1/roots/{root_id}/dir`, `/file`, or `/symlink`) and,
+  unless the conventions in [section 10.3](#103-path-normalization) require **`path_b64`**, the **`path`**
+  query parameter with correct percent-encoding; or
+- **Path-absolute URL** when **`public_base_url`** is omitted: same path and query
+  as above but starting at **`/api/v1/`** (clients resolve against their request origin).
+
+Implementations derive the canonical relative POSIX path encoded in **`path`** /
+**`path_b64`** inside **`url`** as follows:
+
+- **`current`** and **`parent`** use their own **`path`** field from the listing
+  response.
+- **`entries[]`** entries use **`{listing_path}/{name}`**, where **`listing_path`**
+  is the top-level **`path`** property in this directory response (**`entry.name`**
+  only, with no slash when **`listing_path`** is empty). If **`path_b64`**
+  is required for that joined path under [section 10.3](#103-path-normalization),
+  **`url`** must use **`path_b64`** on the query string rather than **`path`**,
+  omitting **`path`** in the URL entirely for that segment.
+
+For **`type: "symlink"`**, **`url`** must target the symlink inode itself
+(**`GET /symlink`** semantics), consistent with **`link_target`** in the listing
+and without implying any follow-policy override.
+
 Example request:
 
 ```sh
@@ -878,7 +912,8 @@ Content-Type: application/json
     "gid": 1000,
     "group": "alice",
     "size": 4096,
-    "mtime": "2026-05-18T08:00:00Z"
+    "mtime": "2026-05-18T08:00:00Z",
+    "url": "https://netixfs.example.com/api/v1/roots/home/dir?path=projects"
   },
   "parent": {
     "name": "..",
@@ -893,7 +928,8 @@ Content-Type: application/json
     "gid": 1000,
     "group": "alice",
     "size": 4096,
-    "mtime": "2026-05-18T07:30:00Z"
+    "mtime": "2026-05-18T07:30:00Z",
+    "url": "https://netixfs.example.com/api/v1/roots/home/dir?path="
   },
   "entries": [
     {
@@ -908,7 +944,8 @@ Content-Type: application/json
       "gid": 1000,
       "group": "alice",
       "size": 4096,
-      "mtime": "2026-05-18T08:30:00Z"
+      "mtime": "2026-05-18T08:30:00Z",
+      "url": "https://netixfs.example.com/api/v1/roots/home/dir?path=projects%2Farchive"
     },
     {
       "name": "current",
@@ -923,7 +960,8 @@ Content-Type: application/json
       "group": "alice",
       "size": 12,
       "mtime": "2026-05-18T09:00:00Z",
-      "link_target": "projects/2026"
+      "link_target": "projects/2026",
+      "url": "https://netixfs.example.com/api/v1/roots/home/symlink?path=projects%2Fcurrent"
     }
   ],
   "next_cursor": "eyJsYXN0IjoiYXJjaGl2ZSJ9"
@@ -959,7 +997,8 @@ Content-Type: application/json
     "gid": 1000,
     "group": "alice",
     "size": 4096,
-    "mtime": "2026-05-18T08:00:00Z"
+    "mtime": "2026-05-18T08:00:00Z",
+    "url": "https://netixfs.example.com/api/v1/roots/home/dir?path=projects"
   },
   "parent": {
     "name": "..",
@@ -974,7 +1013,8 @@ Content-Type: application/json
     "gid": 1000,
     "group": "alice",
     "size": 4096,
-    "mtime": "2026-05-18T07:30:00Z"
+    "mtime": "2026-05-18T07:30:00Z",
+    "url": "https://netixfs.example.com/api/v1/roots/home/dir?path="
   },
   "entries": [
     {
@@ -990,7 +1030,8 @@ Content-Type: application/json
       "group": "alice",
       "size": 18432,
       "mime_type": "text/plain; charset=utf-8",
-      "mtime": "2026-05-18T09:42:13Z"
+      "mtime": "2026-05-18T09:42:13Z",
+      "url": "https://netixfs.example.com/api/v1/roots/home/file?path=projects%2Freport.txt"
     }
   ],
   "next_cursor": null
@@ -1784,9 +1825,9 @@ Controls the TCP port for the main HTTP listener. Ports below 1024 require
 
 ##### Public base URL
 
-Defines the externally visible base URL used in generated links,
-documentation, redirects if any, and operator-facing diagnostics. It must not
-control the listener address.
+Defines the externally visible base URL used in generated URLs (including **`url`**
+on directory listing responses), documentation, redirects if any, and
+operator-facing diagnostics. It must not control the listener address.
 
 - TOML setting: `server.public_base_url`.
 - Command-line argument: `--public-base-url`.
