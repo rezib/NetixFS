@@ -812,7 +812,7 @@ without duplicates:
 CORS preflight must not require `Authorization` and must not perform JWT
 validation.
 
-#### 10.7.10 Private Network Access (optional)
+#### 10.7.8 Private Network Access (optional)
 
 When `cors.allow_private_network=true` and CORS is enabled, NetixFS may support
 Private Network Access for browser requests that include
@@ -821,7 +821,7 @@ NetixFS should respond with `Access-Control-Allow-Private-Network: true` when
 the origin is allowed. This is optional and primarily useful for local
 development, such as a public `https://` page calling `http://127.0.0.1:8080`.
 
-#### 10.7.11 Examples
+#### 10.7.9 Examples
 
 Example allowed preflight:
 
@@ -899,7 +899,7 @@ if the server would otherwise return `200 OK` to a non-browser client.
 
 ### 11.1 Stat API
 
-#### Stat or lstat
+#### 11.1.1 Stat or lstat
 
 `GET /api/v1/roots/{root_id}/stat`
 
@@ -948,7 +948,7 @@ Endpoint-specific errors:
 - `409 Conflict`: symlink handling or mount-boundary policy prevents resolving
   the target.
 
-#### Existence check
+#### 11.1.2 Existence check
 
 `HEAD /api/v1/roots/{root_id}/stat`
 
@@ -984,7 +984,7 @@ Endpoint-specific errors:
 - `409 Conflict`: symlink handling or mount-boundary policy prevents resolving
   the target.
 
-#### List extended attributes
+#### 11.1.3 List extended attributes
 
 `GET /api/v1/roots/{root_id}/xattrs`
 
@@ -1022,7 +1022,7 @@ Endpoint-specific errors:
 - `501 Not Implemented`: the host filesystem or build does not support extended
   attributes.
 
-#### Read extended attribute
+#### 11.1.4 Read extended attribute
 
 `GET /api/v1/roots/{root_id}/xattrs/{name}`
 
@@ -1069,7 +1069,7 @@ POSIX ACLs must not be exposed through the extended attribute API.
 
 ### 11.2 Directory API
 
-#### List directory
+#### 11.2.1 List directory
 
 `GET /api/v1/roots/{root_id}/dir`
 
@@ -1101,9 +1101,9 @@ Objects **`current`**, **`parent`** when present, and each element of **`entries
 must include a string field **`url`**: a ready-to-follow HTTP URL for the primary
 API resource for that row. Interpretation follows the existing **`type`** field:
 
-- **`directory`**: **`url`** is [`GET …/dir`](#list-directory) for that path.
-- **`file`**: **`url`** is [`GET …/file`](#read-file) for file contents.
-- **`symlink`**: **`url`** is [`GET …/symlink`](#read-symbolic-link) for symlink metadata JSON.
+- **`directory`**: **`url`** is [`GET …/dir`](#1121-list-directory) for that path.
+- **`file`**: **`url`** is [`GET …/file`](#1131-read-file) for file contents.
+- **`symlink`**: **`url`** is [`GET …/symlink`](#1141-read-symbolic-link) for symlink metadata JSON.
 
 Each **`url`** must be either:
 
@@ -1293,7 +1293,7 @@ Endpoint-specific errors:
 - `409 Conflict`: target path is not a directory, symlink policy prevents
   resolving it, or mount-boundary policy rejects traversal.
 
-#### Create directory
+#### 11.2.2 Create directory
 
 `POST /api/v1/roots/{root_id}/dir`
 
@@ -1338,7 +1338,7 @@ Endpoint-specific errors:
 - `409 Conflict`: target already exists, a parent component is not a directory,
   or symlink or mount-boundary policy rejects traversal.
 
-#### Remove directory
+#### 11.2.3 Remove directory
 
 `DELETE /api/v1/roots/{root_id}/dir`
 
@@ -1373,7 +1373,7 @@ Endpoint-specific errors:
 - `409 Conflict`: target is not a directory, directory is not empty for
   non-recursive removal, or symlink or mount-boundary policy rejects traversal.
 
-#### Rename or move path
+#### 11.2.4 Rename or move path
 
 `POST /api/v1/roots/{root_id}/rename`
 
@@ -1418,7 +1418,7 @@ Endpoint-specific errors:
   or mount-boundary policy rejects traversal.
 - `412 Precondition Failed`: a supplied HTTP precondition fails.
 
-#### Copy path
+#### 11.2.5 Copy path
 
 `POST /api/v1/roots/{root_id}/copy`
 
@@ -1472,7 +1472,7 @@ File API endpoints must transfer file contents as text when the content is
 represented as text, and as `application/octet-stream` otherwise. Text responses
 must declare an appropriate text media type and character set when known.
 
-#### Read file
+#### 11.3.1 Read file
 
 `GET /api/v1/roots/{root_id}/file`
 
@@ -1529,7 +1529,7 @@ Endpoint-specific errors:
   policy rejects traversal.
 - `416 Range Not Satisfiable`: requested byte range is outside the file.
 
-#### Stream appended data
+#### 11.3.2 Stream appended data
 
 `GET /api/v1/roots/{root_id}/stream`
 
@@ -1601,7 +1601,7 @@ Endpoint-specific errors before response headers are sent:
 - `415 Unsupported Media Type`: target is not eligible text for streaming.
 - `429 Too Many Requests`: maximum concurrent streams is reached.
 
-#### Create or replace file
+#### 11.3.3 Create or replace file
 
 `PUT /api/v1/roots/{root_id}/file`
 
@@ -1685,7 +1685,7 @@ Endpoint-specific errors:
 - `507 Insufficient Storage`: the filesystem cannot allocate space for the
   temporary file or atomic rename.
 
-#### Delete file
+#### 11.3.4 Delete file
 
 `DELETE /api/v1/roots/{root_id}/file`
 
@@ -1725,7 +1725,7 @@ Request body size and non-streaming read size limits must be enforced.
 
 ### 11.4 Link API
 
-#### Read symbolic link
+#### 11.4.1 Read symbolic link
 
 `GET /api/v1/roots/{root_id}/symlink`
 
@@ -1760,7 +1760,7 @@ Endpoint-specific errors:
 - `409 Conflict`: target path is not a symbolic link or mount-boundary policy
   rejects traversal to the link parent.
 
-#### Create symbolic link
+#### 11.4.2 Create symbolic link
 
 `POST /api/v1/roots/{root_id}/symlink`
 
@@ -1803,7 +1803,7 @@ Endpoint-specific errors:
 - `409 Conflict`: link path already exists, a parent component is not a
   directory, or mount-boundary policy rejects traversal.
 
-#### Create hard link
+#### 11.4.3 Create hard link
 
 `POST /api/v1/roots/{root_id}/hardlink`
 
@@ -1852,7 +1852,7 @@ configured symlink policy.
 
 ### 11.5 Permissions API
 
-#### Change mode
+#### 11.5.1 Change mode
 
 `PATCH /api/v1/roots/{root_id}/mode`
 
@@ -1895,7 +1895,7 @@ Endpoint-specific errors:
 - `409 Conflict`: symlink or mount-boundary policy rejects traversal.
 - `412 Precondition Failed`: a supplied HTTP precondition fails.
 
-#### Change group
+#### 11.5.2 Change group
 
 `PATCH /api/v1/roots/{root_id}/group`
 
