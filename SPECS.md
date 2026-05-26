@@ -1685,50 +1685,6 @@ Endpoint-specific errors:
 - `507 Insufficient Storage`: the filesystem cannot allocate space for the
   temporary file or atomic rename.
 
-#### Truncate file
-
-`POST /api/v1/roots/{root_id}/truncate`
-
-Request body fields:
-
-- `path` or `path_b64` is required.
-- `size` is required.
-
-Example request:
-
-```sh
-curl -sS \
-  -X POST \
-  -H "Authorization: Bearer $NETIXFS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"path":"logs/app.log","size":0}' \
-  "https://netixfs.example.com/api/v1/roots/home/truncate"
-```
-
-Example response:
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "path": "logs/app.log",
-  "type": "file",
-  "size": 0
-}
-```
-
-Endpoint-specific errors:
-
-- `400 Bad Request`: request body is invalid, target path syntax is invalid, or
-  `size` is invalid.
-- `403 Forbidden`: truncate is blocked by read-only mode.
-- `404 Not Found`: file path does not exist.
-- `409 Conflict`: target is not a regular file or symlink or mount-boundary
-  policy rejects traversal.
-- `412 Precondition Failed`: a supplied HTTP precondition fails.
-- `507 Insufficient Storage`: extending the file cannot allocate required space.
-
 #### Delete file
 
 `DELETE /api/v1/roots/{root_id}/file`
@@ -3124,7 +3080,7 @@ planning work and is not itself a conformance requirement.
    Cover configured symlink and mount-boundary policy in this phase.
 
 6. Core write APIs:
-   Add create or replace file with atomic replacement, truncate, delete file,
+   Add create or replace file with atomic replacement, delete file,
    create directory, remove empty directory, rename, and copy. Cover read-only
    mode, request body limits, and structured error mapping.
 
