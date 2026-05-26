@@ -113,7 +113,10 @@ switching to the resolved local Linux identity.
 
 ```mermaid
 flowchart TD
-  A[HTTP request] --> B{limits.max_concurrent_requests available?}
+  A[HTTP request] --> A1[Assign or validate request ID]
+  A1 --> A2{CORS preflight OPTIONS on /api/v1?}
+  A2 -- Yes, cors enabled --> A2a[Respond 204 or 403 without JWT or workers]
+  A2 -- No --> B{limits.max_concurrent_requests available?}
   B -- No --> B1[429 Too Many Requests]
   B -- Yes --> C[Validate JWT and configured claims]
   C --> D{Token valid?}
@@ -143,16 +146,20 @@ flowchart TD
   M --> BP[Propagate HTTP backpressure through bounded IPC frames]
   BP --> N
   N --> O{Operation completed?}
-  O -- Success --> O1[Return response or stream]
-  O -- Error --> O2[Return structured error]
+  O -- Success --> O1[Add CORS headers when enabled, then return response or stream]
+  O -- Error --> O2[Add CORS headers when enabled, then return structured error]
   O -- Timeout or disconnect --> O3[Cancel operation and release resources]
 ```
 
 Before dispatching to a worker, the supervisor must complete every check that
 does not require filesystem access as the target user:
 
+- request ID assignment or validation, as defined in
+  [section 13.1](#131-request-ids);
+- cross-origin resource sharing (CORS) on `/api/v1/**` when `cors.enabled=true`,
+  as defined in [section 10.7](#107-cross-origin-resource-sharing-cors).
 - authentication and JWT claim validation, as defined in
-  [section 7](#7-authentication-boundary);
+  [section 7](#7-authentication-boundary), except for CORS preflight requests;
 - username extraction and NSS identity resolution, as defined in
   [section 8](#8-identity-mapping);
 - root selection and path normalization, as defined in
@@ -290,6 +297,12 @@ mount-boundary, and resource-limit checks before filesystem access.
 NetixFS must support both native TLS and deployment behind an upstream
 TLS-terminating proxy. When native TLS is disabled, transport security becomes
 an operator responsibility at the deployment boundary.
+
+Cross-Origin Resource Sharing (CORS) is optional and disabled by default. It
+controls what browser JavaScript on another origin may read from API responses.
+Misconfigured CORS, such as broad `cors.allowed_origins` on a publicly reachable
+listener, can let allowed frontends invoke the API with user-supplied Bearer
+tokens. Details are in [section 10.7](#107-cross-origin-resource-sharing-cors).
 
 ## 7. Authentication Boundary
 
@@ -646,6 +659,241 @@ Retry-After: 2
   }
 }
 ```
+
+### 10.7 Cross-Origin Resource Sharing (CORS)
+
+NetixFS must support Cross-Origin Resource Sharing (CORS) so browser-based
+clients, such as single-page applications and internal file UIs, can call the
+HTTP API from a different origin than the API host. CORS is optional and
+disabled by default. Configuration is defined in
+[section 12](#12-configuration).
+
+#### 10.7.1 Purpose and threat model
+
+CORS is a browser enforcement mechanism. It tells the browser whether
+JavaScript on one origin may read HTTP responses from another origin.
+
+When `cors.enabled=true`, an allowed frontend origin can cause a user's browser
+to send API requests that include a Bearer token the frontend obtained. CORS
+does not create new server-side privileges, but it can increase browser-visible
+attack surface if tokens are stored or handled insecurely in the frontend.
+Operators must not treat CORS as a substitute for network policy, firewall
+rules, mTLS, or binding the API to trusted interfaces.
+
+#### 10.7.2 Enablement and defaults
+
+When `cors.enabled=false`, NetixFS must not emit `Access-Control-*` response
+headers. Cross-origin browser reads will fail in the browser; same-origin
+browser clients, command-line tools, and server-side SDKs are unaffected.
+
+When `cors.enabled=true`, NetixFS must fail closed at startup if
+`cors.allowed_origins` is empty. Wildcard `Access-Control-Allow-Origin: *` must
+not be used when `cors.allow_credentials=true`.
+
+Implementations may load and validate `cors.*` settings before CORS runtime
+support is implemented. Until CORS is implemented, as described in
+[section 16](#16-implementation-plan) step 13, NetixFS must not emit
+`Access-Control-*` headers or handle CORS preflight even if `cors.enabled=true`.
+
+#### 10.7.3 Scope (routes and listeners)
+
+When `cors.enabled=true`, CORS applies only on the main HTTP API listener and
+only to versioned filesystem routes:
+
+```text
+/api/v1/**
+```
+
+This includes all methods documented in [section 11](#11-http-api-endpoints),
+including `OPTIONS` used for preflight.
+
+CORS must not apply by default to:
+
+- `GET /healthz` and `GET /readyz`;
+- the metrics listener configured by `metrics.bind_address`;
+- the runtime configuration listener configured by
+  `diagnostics.config_endpoint.bind_address`.
+
+`OPTIONS` requests outside `/api/v1/**` must return `404 Not Found` or
+`405 Method Not Allowed` without `Access-Control-*` headers.
+
+#### 10.7.4 Request classification (preflight vs actual)
+
+A request is a CORS request when it includes an `Origin` header. If `Origin` is
+absent, NetixFS must not add `Access-Control-*` headers.
+
+A request is a CORS preflight when it is `OPTIONS`, includes `Origin`, and
+includes `Access-Control-Request-Method`. NetixFS must handle preflight on
+`/api/v1/**` without dispatching work to workers, without validating a JWT, and
+without counting the request against `limits.max_concurrent_requests`.
+
+#### 10.7.5 Origin validation
+
+NetixFS must match the request `Origin` against `cors.allowed_origins`. Each
+configured entry must be one of:
+
+- an exact origin string, for example `https://app.example.com`, including
+  scheme, host, and port when the port is not the default for the scheme;
+- a single-subdomain wildcard origin, for example `https://*.example.com`, which
+  matches `https://app.example.com` but not `https://evil.app.example.com` or
+  bare `https://example.com`.
+
+NetixFS must reject configuration entries that are only `*`, lack a scheme, or
+are otherwise ambiguous.
+
+When the origin is allowed, NetixFS must reflect the request `Origin` value in
+`Access-Control-Allow-Origin`. NetixFS must never echo a disallowed origin in
+that header. NetixFS must include `Vary: Origin` on responses when
+`Access-Control-Allow-Origin` is reflected.
+
+If `Origin` is present but not allowed:
+
+- For preflight, NetixFS must return `403 Forbidden` without
+  `Access-Control-Allow-Origin` and without echoing the disallowed origin.
+- For actual requests, NetixFS must process the request normally, including JWT
+  validation, but must omit `Access-Control-Allow-Origin` so the browser hides
+  the response body from JavaScript.
+
+#### 10.7.6 Response headers (success and error)
+
+When `cors.enabled=true` and the request `Origin` is allowed, NetixFS must add
+CORS headers to the response after the status code is known. This includes error
+responses such as `401 Unauthorized`, `403 Forbidden`, `412 Precondition
+Failed`, `429 Too Many Requests`, and `5xx` responses, so browser clients can
+read structured JSON error bodies from JavaScript.
+
+For allowed preflight requests, NetixFS must return `204 No Content` with:
+
+- `Access-Control-Allow-Origin`: reflected allowed origin;
+- `Access-Control-Allow-Methods`: configured or built-in method list;
+- `Access-Control-Allow-Headers`: configured plus built-in request header list;
+- `Access-Control-Max-Age`: from `cors.max_age`, unless `cors.max_age` is zero,
+  in which case NetixFS must omit `Access-Control-Max-Age`;
+- `Vary: Origin`.
+
+For allowed actual requests, NetixFS must include at least:
+
+- `Access-Control-Allow-Origin`: reflected allowed origin;
+- `Access-Control-Expose-Headers`: configured plus built-in exposed header
+  list;
+- `Vary: Origin`.
+
+When `cors.allow_credentials=true` and the origin is allowed, NetixFS must also
+send `Access-Control-Allow-Credentials: true`. NetixFS must not use `*` for
+`Access-Control-Allow-Origin` when credentials are allowed.
+
+Built-in allowed request headers, merged with `cors.allowed_request_headers`
+without duplicates:
+
+- `Authorization`
+- `Content-Type`
+- `Accept`
+- `Range`
+- `If-Match`
+- `If-None-Match`
+- `If-Unmodified-Since`
+- `X-Request-Id`
+
+Built-in allowed methods unless overridden by `cors.allowed_methods`:
+
+- `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`
+
+Built-in exposed response headers, merged with `cors.exposed_response_headers`
+without duplicates:
+
+- `ETag`
+- `Content-Range`
+- `Content-Length`
+- `Content-Type`
+- `X-Request-Id`
+
+#### 10.7.7 Interaction with JWT authentication
+
+CORS preflight must not require `Authorization` and must not perform JWT
+validation.
+
+#### 10.7.10 Private Network Access (optional)
+
+When `cors.allow_private_network=true` and CORS is enabled, NetixFS may support
+Private Network Access for browser requests that include
+`Access-Control-Request-Private-Network: true` on preflight. In that case,
+NetixFS should respond with `Access-Control-Allow-Private-Network: true` when
+the origin is allowed. This is optional and primarily useful for local
+development, such as a public `https://` page calling `http://127.0.0.1:8080`.
+
+#### 10.7.11 Examples
+
+Example allowed preflight:
+
+```http
+OPTIONS /api/v1/roots/home/file?path=report.txt HTTP/1.1
+Host: netixfs.example.com
+Origin: https://app.example.com
+Access-Control-Request-Method: PUT
+Access-Control-Request-Headers: authorization, content-type
+```
+
+```http
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type, Accept, Range, If-Match, If-None-Match, If-Unmodified-Since, X-Request-Id
+Access-Control-Max-Age: 600
+Vary: Origin
+```
+
+Example cross-origin read with Bearer token on the actual request:
+
+```http
+GET /api/v1/roots/home/file?path=report.txt HTTP/1.1
+Host: netixfs.example.com
+Origin: https://app.example.com
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+```http
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Expose-Headers: ETag, Content-Range, Content-Length, Content-Type, X-Request-Id
+Vary: Origin
+Content-Type: application/octet-stream
+ETag: "64769-734221-18432-1779097333"
+
+<file bytes>
+```
+
+Example disallowed origin preflight:
+
+```http
+HTTP/1.1 403 Forbidden
+Vary: Origin
+```
+
+Example `401 Unauthorized` with CORS so JavaScript can read the JSON body:
+
+```http
+HTTP/1.1 401 Unauthorized
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Expose-Headers: ETag, Content-Range, Content-Length, Content-Type, X-Request-Id
+Vary: Origin
+Content-Type: application/json
+
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Missing or invalid bearer token.",
+    "status": 401,
+    "operation": "read_file",
+    "path": "projects/report.txt",
+    "errno": null,
+    "retryable": false,
+    "request_id": "req_01HY9Z55JWQHZJ4CK6V0M4JZ9D"
+  }
+}
+```
+
+When `cors.enabled=false`, browsers block cross-origin reads in JavaScript even
+if the server would otherwise return `200 OK` to a non-browser client.
 
 ## 11. HTTP API Endpoints
 
@@ -1875,6 +2123,113 @@ readable by the supervisor service account and protected from other users.
 - Mandatory: yes, if TLS enabled.
 - Example supported values: `/etc/netixfs/tls.key`.
 
+#### CORS
+
+##### CORS enabled
+
+Enables Cross-Origin Resource Sharing on `/api/v1/**` of the main HTTP listener.
+When disabled, NetixFS must not emit `Access-Control-*` headers.
+
+- TOML setting: `cors.enabled`.
+- Command-line argument: `--cors-enabled`.
+- Environment variable: `NETIXFS_CORS_ENABLED`.
+- Default value: `false`.
+- Mandatory: no.
+- Example supported values: `true`, `false`.
+
+##### CORS allowed origins
+
+Defines the browser origins allowed to read API responses when CORS is enabled.
+Each value must be an exact origin or a single-subdomain wildcard origin as
+defined in [section 10.7](#107-cross-origin-resource-sharing-cors). When
+`cors.enabled=true`, this list must not be empty or NetixFS must fail closed at
+startup.
+
+- TOML setting: `cors.allowed_origins`.
+- Command-line argument: `--cors-allowed-origin` (repeatable).
+- Environment variable: `NETIXFS_CORS_ALLOWED_ORIGINS`.
+- Default value: none (empty list).
+- Mandatory: yes, when CORS enabled.
+- Example supported values: `https://app.example.com`,
+  `https://*.example.com`, `http://localhost:5173`.
+
+##### CORS allowed methods
+
+Overrides the built-in `Access-Control-Allow-Methods` list used for preflight.
+When omitted, NetixFS must use the built-in list from
+[section 10.7](#107-cross-origin-resource-sharing-cors).
+
+- TOML setting: `cors.allowed_methods`.
+- Command-line argument: `--cors-allowed-method` (repeatable).
+- Environment variable: `NETIXFS_CORS_ALLOWED_METHODS`.
+- Default value: built-in list (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`,
+  `DELETE`, `OPTIONS`).
+- Mandatory: no.
+- Example supported values: `GET`, `PUT`, `DELETE`.
+
+##### CORS allowed request headers
+
+Adds request header names to the built-in preflight allowlist. NetixFS must merge
+these values with the built-in list from
+[section 10.7](#107-cross-origin-resource-sharing-cors) without duplicates.
+
+- TOML setting: `cors.allowed_request_headers`.
+- Command-line argument: `--cors-allowed-request-header` (repeatable).
+- Environment variable: `NETIXFS_CORS_ALLOWED_REQUEST_HEADERS`.
+- Default value: none (built-in list only).
+- Mandatory: no.
+- Example supported values: `X-Custom-Client-Version`.
+
+##### CORS exposed response headers
+
+Adds response header names to the built-in `Access-Control-Expose-Headers` list.
+NetixFS must merge these values with the built-in list from
+[section 10.7](#107-cross-origin-resource-sharing-cors) without duplicates.
+
+- TOML setting: `cors.exposed_response_headers`.
+- Command-line argument: `--cors-exposed-response-header` (repeatable).
+- Environment variable: `NETIXFS_CORS_EXPOSED_RESPONSE_HEADERS`.
+- Default value: none (built-in list only).
+- Mandatory: no.
+- Example supported values: `Location`.
+
+##### CORS preflight max age
+
+Controls `Access-Control-Max-Age` for successful preflight responses. A value
+of `0` means NetixFS must omit `Access-Control-Max-Age`.
+
+- TOML setting: `cors.max_age`.
+- Command-line argument: `--cors-max-age`.
+- Environment variable: `NETIXFS_CORS_MAX_AGE`.
+- Default value: `600s`.
+- Mandatory: no.
+- Example supported values: `0s`, `600s`, `10m`.
+
+##### CORS allow credentials
+
+When `true`, NetixFS must send `Access-Control-Allow-Credentials: true` for
+allowed origins and must not use `*` for `Access-Control-Allow-Origin`.
+
+- TOML setting: `cors.allow_credentials`.
+- Command-line argument: `--cors-allow-credentials`.
+- Environment variable: `NETIXFS_CORS_ALLOW_CREDENTIALS`.
+- Default value: `false`.
+- Mandatory: no.
+- Example supported values: `true`, `false`.
+
+##### CORS allow private network
+
+When `true` and CORS is enabled, NetixFS may respond to Private Network Access
+preflight requests with `Access-Control-Allow-Private-Network: true` for allowed
+origins, as described in [section 10.7](#107-cross-origin-resource-sharing-cors).
+
+- TOML setting: `cors.allow_private_network`.
+- Command-line argument: `--cors-allow-private-network`.
+- Environment variable: `NETIXFS_CORS_ALLOW_PRIVATE_NETWORK`.
+- Default value: `false`.
+- Mandatory: no.
+- Example supported values: `true`, `false`.
+
 #### JWT
 
 ##### JWT public key path
@@ -2399,7 +2754,8 @@ structured error body.
 
 Operational logs must support running and debugging NetixFS. They should answer
 what happened inside the service, such as request completion, worker creation,
-JWT key refresh failures, stream disconnects, timeouts, and internal errors.
+JWT key refresh failures, stream disconnects, timeouts, internal errors, and
+rejected CORS preflight requests when `cors.enabled=true`.
 
 Logs must be structured when `logging.format=json`. Each log event should
 include at least:
@@ -2705,7 +3061,9 @@ The design must address:
 - rate limiting or upstream rate-limit expectations;
 - TLS termination model;
 - explicit controls for dangerous operations;
-- protection against accidental exposure of host-sensitive paths.
+- protection against accidental exposure of host-sensitive paths;
+- optional CORS configuration with disabled-by-default behavior and explicit
+  allowed origins, as defined in [section 10.7](#107-cross-origin-resource-sharing-cors).
 
 ## 15. Testing Requirements
 
@@ -2725,7 +3083,8 @@ Testing should cover:
 - error mapping;
 - configuration parsing;
 - Linux capability assumptions;
-- worker process reuse, expiration, and identity isolation.
+- worker process reuse, expiration, and identity isolation;
+- CORS behavior.
 
 Security-sensitive behavior should be covered by integration tests on real Linux
 filesystems, not only unit tests.
@@ -2796,8 +3155,11 @@ planning work and is not itself a conformance requirement.
     behavior, path redaction, configuration validation, and operator-facing
     failure messages.
 
-12. Full specification verification:
+12. Cross-origin resource sharing (CORS):
+    Add supervisor CORS handling on `/api/v1/**` when `cors.enabled=true`.
+
+13. Full specification verification:
     Add end-to-end Linux integration tests for permission behavior, symlink
     races, mount-boundary behavior, worker identity isolation, streaming edge
     cases, concurrent reads and writes, ETag and precondition behavior, error
-    mapping, and configuration precedence.
+    mapping, CORS and configuration precedence.
