@@ -108,7 +108,7 @@ async fn delete_file(
 pub(crate) fn service(config: &Config) -> Router {
     // Use the first configured root as the data root for authentication.
     // resolve() guarantees allowed_roots is non-empty.
-    let data_root = config.filesystem.allowed_roots[0].path.clone();
+    let data_root = config.filesystem.allowed_roots.value[0].path.clone();
     let authenticator = Authenticator::new(data_root);
 
     let middleware = ServiceBuilder::new()
