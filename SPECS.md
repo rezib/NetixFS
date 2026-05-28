@@ -1977,13 +1977,67 @@ sections.
 
 The path to the TOML configuration file should be configurable with
 `--config-file` or `NETIXFS_CONFIG_FILE`. If no configuration file is provided,
-NetixFS should either use documented defaults or fail fast when a required
-setting has no value.
+NetixFS should either use documented defaults or exit with a configuration error
+when a required setting has no value.
 
-### 12.2 Configuration Settings
+### 12.2 Configuration validation and startup
 
-For each setting, `Mandatory: Yes` means NetixFS cannot start without a value
-for that setting or for the documented setting group.
+NetixFS must load, merge, and validate configuration from the TOML file (when
+used), environment variables, and command-line arguments **atomically**. Either
+every recognized setting has an accepted effective value after merge, or startup
+fails. Rejected inputs must not be applied and must not be reflected as
+effective runtime state.
+
+A **configuration error** is any failure during configuration load, merge, or
+validation. Configuration errors include, but are not limited to:
+
+- missing unconditional mandatory settings;
+- unsatisfied documented setting groups (for example, one JWT key source
+  required, TLS certificate and key when native TLS is enabled, or CORS allowed
+  origins when CORS is enabled);
+- invalid type, range, or format for any setting, including optional settings
+  with explicit values;
+- semantic validation failures (for example, duplicate filesystem root IDs or
+  invalid origin strings);
+- conflicting settings when the specification defines mutual exclusion;
+- unrecoverable TOML load or parse errors, or an unreadable configuration file
+  when `--config-file` or `NETIXFS_CONFIG_FILE` is set.
+
+On any configuration error, NetixFS must exit with a non-zero status before
+binding **any** HTTP listener, including the main API listener, the metrics
+listener, and the runtime configuration (`/configz`) listener. Startup failure
+messages must identify the setting and the error, but must not leak sensitive
+rejected values such as tokens, inline secrets, or credentials.
+
+The following are **not** configuration errors: the supervisor may start, but
+`/readyz` may report not ready, when configuration is valid but a runtime
+dependency is temporarily unavailable (for example, a configured JWT public key
+path whose file is not yet readable, or a worker pool that has not finished
+initializing).
+
+Examples of configuration errors (all prevent startup):
+
+| Scenario | Outcome |
+|----------|---------|
+| No `filesystem.allowed_roots` after merge | Exit; message cites missing mandatory setting. |
+| No JWT key source configured | Exit; message cites unsatisfied group. |
+| `tls.enabled=true` without `tls.cert_path` or `tls.key_path` | Exit. |
+| `cors.enabled=true` with empty `cors.allowed_origins` | Exit. |
+| `NETIXFS_SERVER_PORT=99999` | Exit; invalid value (do not start with the default port while discarding the supplied value). |
+| `server.bind_address = "not-an-ip"` | Exit. |
+| Invalid TOML or unreadable config file when a config file path is set | Exit. |
+
+
+**Start** means the supervisor process is running with validated configuration
+and has bound the listeners permitted by that configuration. **Ready** means
+`GET /readyz` returns `200 OK` as defined in [section 13.5](#135-health-and-readiness).
+
+### 12.3 Configuration Settings
+
+For each setting, `Mandatory: Yes` means startup fails with a configuration
+error if the setting, or the documented setting group, has no valid value after
+merge. Any other configuration validation failure is treated the same way:
+NetixFS must exit before binding HTTP listeners.
 
 #### General
 
@@ -2853,9 +2907,16 @@ Content-Type: application/json
 ```
 
 `/readyz` should return `200 OK` only when NetixFS is able to accept useful
-traffic. It should check configuration load status, JWT key availability,
-metrics and worker pool initialization, and whether required service limits are
-valid. It may also include degraded warnings for non-fatal conditions.
+traffic. It should check JWT key availability, metrics and worker pool
+initialization, and whether required service limits are valid. It may also
+include degraded warnings for non-fatal conditions.
+
+Once the supervisor is running, configuration has already validated successfully
+at startup (see [section 12.2](#122-configuration-validation-and-startup)). The
+`configuration` readiness check must therefore report `"ok"`. Readiness
+failures must be reported through the other checks, such as `jwt_keys` or
+`pool`. NetixFS must not re-validate full configuration on every `/readyz`
+request unless a future specification adds configuration hot reload.
 
 Example readiness response:
 
@@ -2898,6 +2959,10 @@ NetixFS should expose an operator-facing endpoint for inspecting the effective
 runtime configuration:
 
 - `GET /configz`: effective runtime configuration and value provenance.
+
+`/configz` is available only after configuration has validated successfully and
+the supervisor has started. If configuration validation fails, NetixFS must not
+start and `/configz` must not be exposed.
 
 `/configz` should be exposed only when
 `diagnostics.config_endpoint.enabled=true`, and its listener should bind to
@@ -2990,10 +3055,7 @@ configuration keys from the host environment.
 
 The endpoint should require the same operator-level protection as other
 diagnostic endpoints unless the deployment explicitly disables authentication
-for local-only diagnostics. If configuration loading failed before the service
-became ready, `/configz` should still return the parsed settings that are known,
-mark failed settings with structured errors, and avoid leaking the rejected raw
-values.
+for local-only diagnostics.
 
 ## 14. Security Requirements
 
