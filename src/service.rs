@@ -11,6 +11,7 @@ use axum::{
 use bytes::Bytes;
 use eyre::Result;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -105,7 +106,7 @@ async fn delete_file(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-pub(crate) fn service(config: &Config) -> Router {
+pub(crate) fn service(config: Arc<Config>) -> Router {
     // Use the first configured root as the data root for authentication.
     // resolve() guarantees allowed_roots is non-empty.
     let data_root = config.filesystem.allowed_roots.value[0].path.clone();

@@ -1,4 +1,4 @@
-use axum::{Json, Router, routing::get, serve::serve};
+use axum::serve::serve;
 use config::Config;
 use eyre::Result;
 use service::service;
@@ -10,14 +10,13 @@ mod config;
 mod service;
 mod user;
 
-async fn run_diagnostics(config: Arc<Config>) -> Result<()> {
+async fn diagnostics_service(config: Arc<Config>) -> Result<()> {
     let address = config.diagnostics.config_endpoint.bind_address.value;
 
     let listener = TcpListener::bind(address).await?;
-    let router = Router::new().route("/configz", get(Json(Arc::clone(&config))));
 
     debug!(%address, "exposing diagnostics endpoint");
-    serve(listener, router).await?;
+    serve(listener, config::service(config)).await?;
     Ok(())
 }
 
@@ -36,14 +35,14 @@ async fn main() -> Result<()> {
         .init();
 
     if config.diagnostics.config_endpoint.enabled.value {
-        spawn(run_diagnostics(Arc::clone(&config)));
+        spawn(diagnostics_service(Arc::clone(&config)));
     }
 
     let address = SocketAddr::new(config.server.bind_address.value, config.server.port.value);
     let listener = TcpListener::bind(address).await?;
 
     debug!(%address, "exposing service endpoint");
-    serve(listener, service(&config)).await?;
+    serve(listener, service(config)).await?;
 
     Ok(())
 }

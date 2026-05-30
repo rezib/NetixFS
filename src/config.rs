@@ -11,6 +11,7 @@
 //! sub-structs, applying defaults and validating mandatory constraints.
 
 use self::parameters::Parameter;
+use axum::{Json, Router, routing::get};
 use bytesize::ByteSize;
 use clap::{ArgMatches, ValueEnum, command};
 use eyre::{Result, WrapErr, bail, eyre};
@@ -24,6 +25,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 use url::Url;
@@ -678,4 +680,8 @@ impl<'a> Resolver<'a> {
     {
         parameter.resolve(self.arguments, self.file_config)
     }
+}
+
+pub(crate) fn service(config: Arc<Config>) -> Router {
+    Router::new().route("/configz", get(Json(Arc::clone(&config))))
 }
