@@ -14,7 +14,7 @@ use self::parameters::Parameter;
 use bytesize::ByteSize;
 use clap::{ArgMatches, ValueEnum, command};
 use eyre::{Result, WrapErr, bail, eyre};
-use serde::{Deserialize, Serialize, de::DeserializeOwned, ser::SerializeMap};
+use serde::{Deserialize, Serialize, ser::SerializeMap};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::{
     ffi::OsString,
@@ -22,7 +22,7 @@ use std::{
     fs::Permissions,
     net::{IpAddr, SocketAddr},
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     str::FromStr,
     time::Duration,
 };
@@ -42,19 +42,24 @@ where
         .args(parameters::arguments())
         .groups(parameters::argument_groups())
         .get_matches_from(args);
-    let file_config = arguments
-        .get_one::<&Path>(parameters::CONFIG_FILE.id)
-        .map(|path| -> Result<toml::Table> {
-            let content = std::fs::read_to_string(path)
-                .wrap_err_with(|| format!("failed to read config file {:?}", path))?;
+    let config_file = parameters::CONFIG_FILE.resolve(&arguments, None)?;
+    let file_config = config_file
+        .value
+        .as_ref()
+        .map(|config_file_path| -> Result<toml::Table> {
+            let content = std::fs::read_to_string(config_file_path)
+                .wrap_err_with(|| format!("failed to read config file {:?}", config_file_path))?;
             toml::from_str::<toml::Table>(&content)
-                .wrap_err_with(|| format!("failed to parse config file {:?}", path))
+                .wrap_err_with(|| format!("failed to parse config file {:?}", config_file_path))
         })
-        .unwrap_or_else(|| Ok(toml::Table::default()))?;
-    Config::resolve(Resolver {
-        arguments: &arguments,
-        file_config: &file_config,
-    })
+        .transpose()?;
+    Config::resolve(
+        config_file,
+        Resolver {
+            arguments: &arguments,
+            file_config: file_config.as_ref(),
+        },
+    )
 }
 
 // ── Config structs ───────────────────────────────────────────────────────────
@@ -129,10 +134,8 @@ pub(crate) struct AuthConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct JwtConfig {
-    pub public_key_path: Value<Option<PathBuf>>,
-    pub public_key_url: Value<Option<Url>>,
-    pub jwks_path: Value<Option<PathBuf>>,
-    pub jwks_url: Value<Option<Url>>,
+    #[serde(flatten)]
+    pub source: JwtSource,
     pub issuer: Value<Option<String>>,
     pub audience: Value<Option<String>>,
     pub username_claim: Value<String>,
@@ -141,18 +144,125 @@ pub(crate) struct JwtConfig {
 
 impl JwtConfig {
     fn resolve(resolver: Resolver<'_>) -> Result<Self> {
-        // TODO: Check that jwt sources are exclusive when they come from the same config value source.
+        let public_key_path = resolver.resolve(&parameters::AUTH_JWT_PUBLIC_KEY_PATH)?;
+        let public_key_url = resolver.resolve(&parameters::AUTH_JWT_PUBLIC_KEY_URL)?;
+        let jwks_path = resolver.resolve(&parameters::AUTH_JWT_JWKS_PATH)?;
+        let jwks_url = resolver.resolve(&parameters::AUTH_JWT_JWKS_URL)?;
+
         Ok(Self {
-            public_key_path: resolver.resolve(&parameters::AUTH_JWT_PUBLIC_KEY_PATH)?,
-            public_key_url: resolver.resolve(&parameters::AUTH_JWT_PUBLIC_KEY_URL)?,
-            jwks_path: resolver.resolve(&parameters::AUTH_JWT_JWKS_PATH)?,
-            jwks_url: resolver.resolve(&parameters::AUTH_JWT_JWKS_URL)?,
+            source: JwtSource::resolve(public_key_path, public_key_url, jwks_path, jwks_url)?,
             issuer: resolver.resolve(&parameters::AUTH_JWT_ISSUER)?,
             audience: resolver.resolve(&parameters::AUTH_JWT_AUDIENCE)?,
             username_claim: resolver.resolve(&parameters::AUTH_JWT_USERNAME_CLAIM)?,
             remote_key_refresh_interval: resolver
-                .resolve(&parameters::AUTH_JWT_REMOTE_KEY_REFRESH_INTERVAL)?,
+                .resolve(&parameters::AUTH_JWT_REMOTE_KEY_REFRESH_INTERVAL)?
+                .map(Into::into),
         })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum JwtSource {
+    PublicKeyPath(Value<PathBuf>),
+    PublicKeyUrl(Value<Url>),
+    JwksPath(Value<PathBuf>),
+    JwksUrl(Value<Url>),
+}
+
+impl JwtSource {
+    fn resolve(
+        public_key_path: Value<Option<PathBuf>>,
+        public_key_url: Value<Option<Url>>,
+        jwks_path: Value<Option<PathBuf>>,
+        jwks_url: Value<Option<Url>>,
+    ) -> Result<Self> {
+        #[derive(Copy, Clone)]
+        enum Candidate {
+            PublicKeyPath(&'static str, ValueSource),
+            PublicKeyUrl(&'static str, ValueSource),
+            JwksPath(&'static str, ValueSource),
+            JwksUrl(&'static str, ValueSource),
+        }
+
+        impl Candidate {
+            fn value_source(self) -> ValueSource {
+                match self {
+                    Self::PublicKeyPath(_, value_source) => value_source,
+                    Self::PublicKeyUrl(_, value_source) => value_source,
+                    Self::JwksPath(_, value_source) => value_source,
+                    Self::JwksUrl(_, value_source) => value_source,
+                }
+            }
+
+            fn id(self) -> &'static str {
+                match self {
+                    Self::PublicKeyPath(id, _) => id,
+                    Self::PublicKeyUrl(id, _) => id,
+                    Self::JwksPath(id, _) => id,
+                    Self::JwksUrl(id, _) => id,
+                }
+            }
+        }
+
+        let candidates = [
+            Candidate::PublicKeyPath(public_key_path.id, public_key_path.source),
+            Candidate::PublicKeyUrl(public_key_url.id, public_key_url.source),
+            Candidate::JwksPath(jwks_path.id, jwks_path.source),
+            Candidate::JwksUrl(jwks_url.id, jwks_url.source),
+        ];
+
+        let make_source_no_value_error =
+            || eyre!("logic error: JWT source has a source but no value");
+
+        for value_source in [
+            ValueSource::Argument,
+            ValueSource::Environment,
+            ValueSource::ConfigFile,
+        ] {
+            let mut value_source_candidates = candidates
+                .iter()
+                .filter(|candidate| candidate.value_source() == value_source);
+            if let Some(candidate) = value_source_candidates.next() {
+                match value_source_candidates.next() {
+                    None => {
+                        let source = match candidate {
+                            Candidate::PublicKeyPath(_, _) => Self::PublicKeyPath(
+                                public_key_path
+                                    .transpose()
+                                    .ok_or_else(make_source_no_value_error)?,
+                            ),
+                            Candidate::PublicKeyUrl(_, _) => Self::PublicKeyUrl(
+                                public_key_url
+                                    .transpose()
+                                    .ok_or_else(make_source_no_value_error)?,
+                            ),
+                            Candidate::JwksPath(_, _) => Self::JwksPath(
+                                jwks_path
+                                    .transpose()
+                                    .ok_or_else(make_source_no_value_error)?,
+                            ),
+                            Candidate::JwksUrl(_, _) => Self::JwksUrl(
+                                jwks_url
+                                    .transpose()
+                                    .ok_or_else(make_source_no_value_error)?,
+                            ),
+                        };
+                        return Ok(source);
+                    }
+                    Some(other) => bail!(
+                        "only one JWT source must be specified (found {:?} and {:?} in {})",
+                        candidate.id(),
+                        other.id(),
+                        value_source.in_description()
+                    ),
+                }
+            }
+        }
+
+        Err(eyre!(
+            "one and only JWT source must be provided in command line arguments, environment or configuration file"
+        ))
     }
 }
 
@@ -384,10 +494,42 @@ pub(crate) enum SymlinkPolicy {
 pub(crate) struct Value<T> {
     pub value: T,
     pub source: ValueSource,
+    pub id: &'static str,
     pub toml: Option<&'static str>,
     pub argument: &'static str,
     pub environment: &'static str,
     pub sensitive: bool,
+}
+
+impl<T> Value<T> {
+    fn map<F, U>(self, f: F) -> Value<U>
+    where
+        F: Fn(T) -> U,
+    {
+        Value {
+            value: f(self.value),
+            source: self.source,
+            id: self.id,
+            toml: self.toml,
+            argument: self.argument,
+            environment: self.environment,
+            sensitive: self.sensitive,
+        }
+    }
+}
+
+impl<T> Value<Option<T>> {
+    fn transpose(self) -> Option<Value<T>> {
+        self.value.map(|value| Value {
+            value,
+            source: self.source,
+            id: self.id,
+            toml: self.toml,
+            argument: self.argument,
+            environment: self.environment,
+            sensitive: self.sensitive,
+        })
+    }
 }
 
 impl<T> Serialize for Value<T>
@@ -413,13 +555,24 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ValueSource {
     Default,
     ConfigFile,
     Environment,
     Argument,
+}
+
+impl ValueSource {
+    fn in_description(self) -> &'static str {
+        match self {
+            ValueSource::ConfigFile => "configuration file",
+            ValueSource::Environment => "environment",
+            ValueSource::Argument => "command line arguments",
+            ValueSource::Default => "default",
+        }
+    }
 }
 
 impl From<clap::parser::ValueSource> for ValueSource {
@@ -435,9 +588,9 @@ impl From<clap::parser::ValueSource> for ValueSource {
 
 impl Config {
     /// Get either from CLI, environment or configuration file, apply defaults, validate constraints, and produce a fully-typed `Config`.
-    fn resolve(resolver: Resolver<'_>) -> Result<Self> {
+    fn resolve(config_file: Value<Option<PathBuf>>, resolver: Resolver<'_>) -> Result<Self> {
         Ok(Self {
-            config_file: resolver.resolve(&parameters::CONFIG_FILE)?,
+            config_file,
             server: ServerConfig {
                 bind_address: resolver.resolve(&parameters::SERVER_BIND_ADDRESS)?,
                 port: resolver.resolve(&parameters::SERVER_PORT)?,
@@ -470,14 +623,26 @@ impl Config {
                     .resolve(&parameters::LIMITS_MAX_CONCURRENT_STREAMS)?,
             },
             streaming: StreamingConfig {
-                idle_timeout: resolver.resolve(&parameters::STREAMING_IDLE_TIMEOUT)?,
-                max_duration: resolver.resolve(&parameters::STREAMING_MAX_DURATION)?,
-                heartbeat_interval: resolver.resolve(&parameters::STREAMING_HEARTBEAT_INTERVAL)?,
+                idle_timeout: resolver
+                    .resolve(&parameters::STREAMING_IDLE_TIMEOUT)?
+                    .map(Into::into),
+                max_duration: resolver
+                    .resolve(&parameters::STREAMING_MAX_DURATION)?
+                    .map(Into::into),
+                heartbeat_interval: resolver
+                    .resolve(&parameters::STREAMING_HEARTBEAT_INTERVAL)?
+                    .map(Into::into),
             },
             pool: PoolConfig {
-                max_workers: resolver.resolve(&parameters::POOL_MAX_WORKERS)?,
-                idle_timeout: resolver.resolve(&parameters::POOL_IDLE_TIMEOUT)?,
-                request_timeout: resolver.resolve(&parameters::POOL_REQUEST_TIMEOUT)?,
+                max_workers: resolver
+                    .resolve(&parameters::POOL_MAX_WORKERS)?
+                    .map(Into::into),
+                idle_timeout: resolver
+                    .resolve(&parameters::POOL_IDLE_TIMEOUT)?
+                    .map(Into::into),
+                request_timeout: resolver
+                    .resolve(&parameters::POOL_REQUEST_TIMEOUT)?
+                    .map(Into::into),
             },
             logging: LoggingConfig {
                 level: resolver.resolve(&parameters::LOGGING_LEVEL)?,
@@ -503,31 +668,14 @@ impl Config {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Resolver<'a> {
     arguments: &'a ArgMatches,
-    file_config: &'a toml::Table,
+    file_config: Option<&'a toml::Table>,
 }
 
 impl<'a> Resolver<'a> {
-    fn resolve<T>(&self, parameter: &Parameter<T>) -> Result<Value<T>>
+    fn resolve<T>(&self, parameter: &Parameter<T>) -> Result<Value<T::Output>>
     where
-        T: DeserializeOwned + Clone + Send + Sync + 'static,
+        T: parameters::ValueSeed,
     {
-        let (value, source) = parameter
-            .try_resolve_from_args(self.arguments)
-            .transpose()
-            .or_else(|| {
-                parameter
-                    .try_resolve_from_file(self.file_config)
-                    .transpose()
-            })
-            .transpose()?
-            .unwrap_or_else(|| parameter.resolve_to_default());
-        Ok(Value {
-            value,
-            source,
-            argument: parameter.argument,
-            environment: parameter.environment,
-            toml: parameter.toml,
-            sensitive: parameter.sensitive,
-        })
+        parameter.resolve(self.arguments, self.file_config)
     }
 }
