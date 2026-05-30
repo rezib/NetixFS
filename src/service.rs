@@ -60,9 +60,9 @@ async fn read_file(
 }
 
 async fn write_file(
-    Extension(user): Extension<User>,
-    RequestPath(file_path): RequestPath<String>,
-    content: Bytes,
+    Extension(_user): Extension<User>,
+    RequestPath(_file_path): RequestPath<String>,
+    _content: Bytes,
 ) -> Result<Response, StatusCode> {
     // let path = get_path(&request);
     // let token = authentication_token(request.headers()).ok_or(StatusCode::UNAUTHORIZED)?;
@@ -86,8 +86,8 @@ async fn write_file(
 }
 
 async fn delete_file(
-    Extension(user): Extension<User>,
-    RequestPath(file_path): RequestPath<String>,
+    Extension(_user): Extension<User>,
+    RequestPath(_file_path): RequestPath<String>,
 ) -> Result<Response, StatusCode> {
     // let path = get_path(&request);
     // let token = authentication_token(request.headers()).ok_or(StatusCode::UNAUTHORIZED)?;
