@@ -11,12 +11,14 @@
 //! sub-structs, applying defaults and validating mandatory constraints.
 
 use self::parameters::Parameter;
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, http::Method, routing::get};
 use bytesize::ByteSize;
 use clap::{ArgMatches, ValueEnum, command};
 use eyre::{Result, WrapErr, bail, eyre};
-use serde::{Deserialize, Serialize, ser::SerializeMap};
-use serde_with::{DeserializeFromStr, SerializeDisplay};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
+use serde_with::{
+    DeserializeFromStr, SerializeAs, SerializeDisplay, ser::SerializeAsWrap, serde_as,
+};
 use std::{
     ffi::OsString,
     fmt::Display,
@@ -71,6 +73,7 @@ pub(crate) struct Config {
     pub config_file: Value<Option<PathBuf>>,
     pub server: ServerConfig,
     pub tls: TlsConfig,
+    pub cors: CorsConfig,
     pub auth: AuthConfig,
     pub filesystem: FilesystemConfig,
     pub operations: OperationsConfig,
@@ -91,9 +94,9 @@ pub(crate) struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TlsConfig {
-    enabled: Value<bool>,
-    cert_path: Value<Option<PathBuf>>,
-    key_path: Value<Option<PathBuf>>,
+    pub enabled: Value<bool>,
+    pub cert_path: Value<Option<PathBuf>>,
+    pub key_path: Value<Option<PathBuf>>,
 }
 
 impl TlsConfig {
@@ -126,6 +129,61 @@ impl TlsConfig {
             cert_path,
             key_path,
         })
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CorsConfig {
+    pub enabled: Value<bool>,
+    pub allowed_origins: Value<Vec<String>>,
+    #[serde_as(as = "Value<Vec<SerdeMethod>>")]
+    pub allowed_methods: Value<Vec<Method>>,
+    pub allowed_request_headers: Value<Vec<String>>,
+    pub exposed_response_headers: Value<Vec<String>>,
+    pub max_age: Value<Duration>,
+    pub allow_credentials: Value<bool>,
+    pub allow_private_network: Value<bool>,
+}
+
+impl CorsConfig {
+    fn resolve(resolver: Resolver<'_>) -> Result<Self> {
+        let enabled = resolver.resolve(&parameters::CORS_ENABLED)?;
+        let allowed_origins = resolver.resolve(&parameters::CORS_ALLOWED_ORIGINS)?;
+
+        if enabled.value && allowed_origins.value.is_empty() {
+            bail!("at least one CORS allowed origin must be specified if CORS is enabled");
+        }
+
+        Ok(Self {
+            enabled,
+            allowed_origins,
+            allowed_methods: resolver
+                .resolve(&parameters::CORS_ALLOWED_METHODS)?
+                .try_map(|methods| {
+                    methods
+                        .iter()
+                        .map(|str| str.parse())
+                        .collect::<Result<_, _>>()
+                })?,
+            allowed_request_headers: resolver.resolve(&parameters::CORS_ALLOWED_REQUEST_HEADERS)?,
+            exposed_response_headers: resolver
+                .resolve(&parameters::CORS_EXPOSED_RESPONSE_HEADERS)?,
+            max_age: resolver.resolve(&parameters::CORS_MAX_AGE)?.map(Into::into),
+            allow_credentials: resolver.resolve(&parameters::CORS_ALLOW_CREDENTIALS)?,
+            allow_private_network: resolver.resolve(&parameters::CORS_ALLOW_PRIVATE_NETWORK)?,
+        })
+    }
+}
+
+struct SerdeMethod;
+
+impl SerializeAs<Method> for SerdeMethod {
+    fn serialize_as<S>(method: &Method, serializer: S) -> std::prelude::v1::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(method.as_str())
     }
 }
 
@@ -518,6 +576,21 @@ impl<T> Value<T> {
             sensitive: self.sensitive,
         }
     }
+
+    fn try_map<F, U, E>(self, f: F) -> std::result::Result<Value<U>, E>
+    where
+        F: Fn(T) -> Result<U, E>,
+    {
+        Ok(Value {
+            value: f(self.value)?,
+            source: self.source,
+            id: self.id,
+            toml: self.toml,
+            argument: self.argument,
+            environment: self.environment,
+            sensitive: self.sensitive,
+        })
+    }
 }
 
 impl<T> Value<Option<T>> {
@@ -534,26 +607,60 @@ impl<T> Value<Option<T>> {
     }
 }
 
+pub(super) fn serialize_value<T, I, S>(
+    value: &Value<T>,
+    inner: &I,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    I: Serialize,
+{
+    const VALUE_FIELD_NAME: &str = "value";
+    const SOURCE_FIELD_NAME: &str = "source";
+    const TOML_FIELD_NAME: &str = "toml";
+    const ARGUMENT_FIELD_NAME: &str = "argument";
+    const ENVIRONMENT_FIELD_NAME: &str = "environment";
+    const REDACTED_VALUE: &str = "** redacted **";
+
+    let mut serializer = serializer.serialize_struct("Value", 5)?;
+    if value.sensitive {
+        serializer.serialize_field(VALUE_FIELD_NAME, REDACTED_VALUE)?;
+    } else {
+        serializer.serialize_field(VALUE_FIELD_NAME, &inner)?;
+    }
+    serializer.serialize_field(SOURCE_FIELD_NAME, &value.source)?;
+    serializer.serialize_field(TOML_FIELD_NAME, &value.toml)?;
+    serializer.serialize_field(ARGUMENT_FIELD_NAME, &value.argument)?;
+    serializer.serialize_field(ENVIRONMENT_FIELD_NAME, &value.environment)?;
+    serializer.end()
+}
+
 impl<T> Serialize for Value<T>
 where
     T: Serialize,
 {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
-        S: serde::Serializer,
+        S: Serializer,
     {
-        let mut serializer = serializer.serialize_map(None)?;
-        const VALUE_FIELD_NAME: &str = "value";
-        if self.sensitive {
-            serializer.serialize_entry(VALUE_FIELD_NAME, "********")?;
-        } else {
-            serializer.serialize_entry(VALUE_FIELD_NAME, &self.value)?;
-        }
-        serializer.serialize_entry("source", &self.source)?;
-        serializer.serialize_entry("toml", &self.toml)?;
-        serializer.serialize_entry("argument", &self.argument)?;
-        serializer.serialize_entry("environment", &self.environment)?;
-        serializer.end()
+        serialize_value(self, &self.value, serializer)
+    }
+}
+
+impl<T, U> SerializeAs<Value<T>> for Value<U>
+where
+    U: SerializeAs<T>,
+{
+    fn serialize_as<S>(source: &Value<T>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_value(
+            source,
+            &SerializeAsWrap::<T, U>::new(&source.value),
+            serializer,
+        )
     }
 }
 
@@ -599,6 +706,7 @@ impl Config {
                 public_base_url: resolver.resolve(&parameters::SERVER_PUBLIC_BASE_URL)?,
             },
             tls: TlsConfig::resolve(resolver)?,
+            cors: CorsConfig::resolve(resolver)?,
             auth: AuthConfig {
                 jwt: JwtConfig::resolve(resolver)?,
             },

@@ -2040,16 +2040,15 @@ initializing).
 
 Examples of configuration errors (all prevent startup):
 
-| Scenario | Outcome |
-|----------|---------|
-| No `filesystem.allowed_roots` after merge | Exit; message cites missing mandatory setting. |
-| No JWT key source configured | Exit; message cites unsatisfied group. |
-| `tls.enabled=true` without `tls.cert_path` or `tls.key_path` | Exit. |
-| `cors.enabled=true` with empty `cors.allowed_origins` | Exit. |
-| `NETIXFS_SERVER_PORT=99999` | Exit; invalid value (do not start with the default port while discarding the supplied value). |
-| `server.bind_address = "not-an-ip"` | Exit. |
-| Invalid TOML or unreadable config file when a config file path is set | Exit. |
-
+| Scenario                                                              | Outcome                                                                                       |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| No `filesystem.allowed_roots` after merge                             | Exit; message cites missing mandatory setting.                                                |
+| No JWT key source configured                                          | Exit; message cites unsatisfied group.                                                        |
+| `tls.enabled=true` without `tls.cert_path` or `tls.key_path`          | Exit.                                                                                         |
+| `cors.enabled=true` with empty `cors.allowed_origins`                 | Exit.                                                                                         |
+| `NETIXFS_SERVER_PORT=99999`                                           | Exit; invalid value (do not start with the default port while discarding the supplied value). |
+| `server.bind_address = "not-an-ip"`                                   | Exit.                                                                                         |
+| Invalid TOML or unreadable config file when a config file path is set | Exit.                                                                                         |
 
 **Start** means the supervisor process is running with validated configuration
 and has bound the listeners permitted by that configuration. **Ready** means

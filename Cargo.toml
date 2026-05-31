@@ -15,7 +15,20 @@ tokio = { version = "1.52.3", features = [
 clap = { version = "4.6.1", features = ["cargo", "derive", "env"] }
 headers = "0.4.1"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
-tower-http = { version = "0.6.10", features = ["auth", "compression-br", "decompression-br", "normalize-path", "on-early-drop", "sensitive-headers", "set-header", "timeout", "trace", "tracing", "util"] }
+tower-http = { version = "0.6.10", features = [
+  "auth",
+  "compression-br",
+  "cors",
+  "decompression-br",
+  "normalize-path",
+  "on-early-drop",
+  "sensitive-headers",
+  "set-header",
+  "timeout",
+  "trace",
+  "tracing",
+  "util",
+] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 toml = "1.1.2"
 eyre = "0.6.12"

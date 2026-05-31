@@ -343,6 +343,79 @@ lazy_static! {
             .arg_value_parser(value_parser!(PathBuf))
             .build();
 
+    // ── CORS ─────────────────────────────────────────────────────────────────────────────
+    pub(super) static ref CORS_ENABLED: Parameter<Simple<bool>> =
+        Parameter::builder("cors.enabled")
+            .argument("--cors-enabled")
+            .environment("NETIXFS_CORS_ENABLED")
+            .toml("cors.enabled")
+            .default(false)
+            .arg_value_parser(BoolishValueParser::new())
+            .build();
+
+    pub(super) static ref CORS_ALLOWED_ORIGINS: Parameter<Vec<String>> =
+        Parameter::builder("cors.allowed_origins")
+            .argument("--cors-allowed-origin")
+            .environment("NETIXFS_CORS_ALLOWED_ORIGINS")
+            .toml("cors.allowed_origins")
+            .default(Vec::new())
+            .arg_value_parser(value_parser!(String))
+            .build();
+
+    pub(super) static ref CORS_ALLOWED_METHODS: Parameter<Vec<String>> =
+        Parameter::builder("cors.allowed_methods")
+            .argument("--cors-allowed-method")
+            .environment("NETIXFS_CORS_ALLOWED_METHODS")
+            .toml("cors.allowed_methods")
+            .default(Vec::new())
+            .arg_value_parser(value_parser!(String))
+            .build();
+
+    pub(super) static ref CORS_ALLOWED_REQUEST_HEADERS: Parameter<Vec<String>> =
+        Parameter::builder("cors.allowed_request_headers")
+            .argument("--cors-allowed-request-header")
+            .environment("NETIXFS_CORS_ALLOWED_REQUEST_HEADERS")
+            .toml("cors.allowed_request_headers")
+            .default(Vec::new())
+            .arg_value_parser(value_parser!(String))
+            .build();
+
+    pub(super) static ref CORS_EXPOSED_RESPONSE_HEADERS: Parameter<Vec<String>> =
+        Parameter::builder("cors.exposed_response_headers")
+            .argument("--cors-exposed-response-header")
+            .environment("NETIXFS_CORS_EXPOSED_RESPONSE_HEADERS")
+            .toml("cors.exposed_response_headers")
+            .default(Vec::new())
+            .arg_value_parser(value_parser!(String))
+            .build();
+
+    pub(super) static ref CORS_MAX_AGE: Parameter<Simple<HumanDuration>> =
+        Parameter::builder("cors.max_age")
+            .argument("--cors-max-age")
+            .environment("NETIXFS_CORS_MAX_AGE")
+            .toml("cors.max_age")
+            .default(HumanDuration(Duration::from_secs(600)))
+            .arg_value_parser(value_parser!(String))
+            .build();
+
+    pub(super) static ref CORS_ALLOW_CREDENTIALS: Parameter<Simple<bool>> =
+        Parameter::builder("cors.allow_credentials")
+            .argument("--cors-allow-credentials")
+            .environment("NETIXFS_CORS_ALLOW_CREDENTIALS")
+            .toml("cors.allow_credentials")
+            .default(false)
+            .arg_value_parser(BoolishValueParser::new())
+            .build();
+
+    pub(super) static ref CORS_ALLOW_PRIVATE_NETWORK: Parameter<Simple<bool>> =
+        Parameter::builder("cors.allow_private_network")
+            .argument("--cors-allow-private-network")
+            .environment("NETIXFS_CORS_ALLOW_PRIVATE_NETWORK")
+            .toml("cors.allow_private_network")
+            .default(false)
+            .arg_value_parser(BoolishValueParser::new())
+            .build();
+
     // ── Authentication ───────────────────────────────────────────────────────────────────
     pub(super) static ref AUTH_JWT_PUBLIC_KEY_PATH: Parameter<Option<PathBuf>> =
         Parameter::builder("auth.jwt.public_key_path")
@@ -425,7 +498,7 @@ lazy_static! {
             .environment("NETIXFS_FILESYSTEM_ALLOWED_ROOTS")
             .toml("filesystem.allowed_roots")
             .default(Vec::new())
-            .arg_value_parser(ValueParser::from(value_parser!(Root)))
+            .arg_value_parser(value_parser!(Root))
             .arg_action(ArgAction::Append)
             .build();
 
@@ -537,6 +610,7 @@ lazy_static! {
             .default(ByteSize::mib(100))
             .arg_value_parser(value_parser!(ByteSize))
             .build();
+
     pub(super) static ref LIMITS_MAX_READ_SIZE: Parameter<Simple<ByteSize>> =
         Parameter::builder("limits.max_read_size")
             .argument("--max-read-size")
@@ -545,6 +619,7 @@ lazy_static! {
             .default(ByteSize::mib(100))
             .arg_value_parser(value_parser!(ByteSize))
             .build();
+
     pub(super) static ref LIMITS_MAX_DIRECTORY_ENTRIES: Parameter<Simple<u32>> =
         Parameter::builder("limits.max_directory_entries")
             .argument("--max-directory-entries")
@@ -553,6 +628,7 @@ lazy_static! {
             .default(10000u32)
             .arg_value_parser(value_parser!(u32))
             .build();
+
     pub(super) static ref LIMITS_MAX_CONCURRENT_REQUESTS: Parameter<Simple<u32>> =
         Parameter::builder("limits.max_concurrent_requests")
             .argument("--max-concurrent-requests")
@@ -561,6 +637,7 @@ lazy_static! {
             .default(1024u32)
             .arg_value_parser(value_parser!(u32))
             .build();
+
     pub(super) static ref LIMITS_MAX_CONCURRENT_STREAMS: Parameter<Simple<u32>> =
         Parameter::builder("limits.max_concurrent_streams")
             .argument("--max-concurrent-streams")
@@ -579,6 +656,7 @@ lazy_static! {
             .default(HumanDuration(Duration::from_mins(5)))
             .arg_value_parser(value_parser!(HumanDuration))
             .build();
+
     pub(super) static ref STREAMING_MAX_DURATION: Parameter<Simple<HumanDuration>> =
         Parameter::builder("streaming.max_duration")
             .argument("--stream-max-duration")
@@ -587,6 +665,7 @@ lazy_static! {
             .default(HumanDuration(Duration::from_hours(1)))
             .arg_value_parser(value_parser!(HumanDuration))
             .build();
+
     pub(super) static ref STREAMING_HEARTBEAT_INTERVAL: Parameter<Simple<HumanDuration>> =
         Parameter::builder("streaming.heartbeat_interval")
             .argument("--stream-heartbeat-interval")
@@ -605,6 +684,7 @@ lazy_static! {
             .default(64u32)
             .arg_value_parser(value_parser!(u32))
             .build();
+
     pub(super) static ref POOL_IDLE_TIMEOUT: Parameter<Simple<HumanDuration>> =
         Parameter::builder("pool.idle_timeout")
             .argument("--pool-idle-timeout")
@@ -613,6 +693,7 @@ lazy_static! {
             .default(HumanDuration(Duration::from_mins(5)))
             .arg_value_parser(value_parser!(HumanDuration))
             .build();
+
     pub(super) static ref POOL_REQUEST_TIMEOUT: Parameter<Simple<HumanDuration>> =
         Parameter::builder("pool.request_timeout")
             .argument("--pool-request-timeout")
@@ -709,6 +790,15 @@ pub(super) fn arguments() -> impl IntoIterator<Item = Arg> {
         TLS_ENABLED.to_arg(),
         TLS_CERT_PATH.to_arg(),
         TLS_KEY_PATH.to_arg(),
+        // ── CORS ─────────────────────────────────────────────────────────────────
+        CORS_ENABLED.to_arg(),
+        CORS_ALLOWED_ORIGINS.to_arg(),
+        CORS_ALLOWED_METHODS.to_arg(),
+        CORS_ALLOWED_REQUEST_HEADERS.to_arg(),
+        CORS_EXPOSED_RESPONSE_HEADERS.to_arg(),
+        CORS_MAX_AGE.to_arg(),
+        CORS_ALLOW_CREDENTIALS.to_arg(),
+        CORS_ALLOW_PRIVATE_NETWORK.to_arg(),
         // ── JWT ──────────────────────────────────────────────────────────────────
         AUTH_JWT_PUBLIC_KEY_PATH.to_arg(),
         AUTH_JWT_PUBLIC_KEY_URL.to_arg(),
