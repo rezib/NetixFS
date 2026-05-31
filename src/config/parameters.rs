@@ -367,7 +367,7 @@ lazy_static! {
             .argument("--cors-allowed-method")
             .environment("NETIXFS_CORS_ALLOWED_METHODS")
             .toml("cors.allowed_methods")
-            .default(Vec::new())
+            .default(vec!["GET".to_owned(), "HEAD".to_owned(), "POST".to_owned(), "PUT".to_owned(), "PATCH".to_owned(), "DELETE".to_owned(), "OPTIONS".to_owned()])
             .arg_value_parser(value_parser!(String))
             .build();
 
