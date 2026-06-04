@@ -231,6 +231,29 @@ Shared task queues should not be used for worker IPC because they make
 per-request cancellation, backpressure, identity isolation, and stream ownership
 harder to reason about.
 
+Unnamed pipes and process standard I/O were considered as alternatives to
+socket pairs. Neither was rejected because of worker UID, primary GID, or
+supplementary group switching: file descriptors inherited at worker creation
+remain usable after identity change and capability dropping.
+
+A design based on two unnamed pipes (supervisor-to-worker and
+worker-to-supervisor) can provide bidirectional byte streams and can pass
+endpoints to each child at spawn time, similar to a socket pair. It was not
+retained because it uses four file descriptors per worker instead of two,
+splits control and data across two kernel objects, and does not offer a single
+full-duplex channel for interleaved request, response, error, cancellation, and
+stream-chunk frames.
+
+Repurposing `stdin` and `stdout` as the IPC channel (typically by wiring pipe
+ends onto file descriptors 0 and 1 at worker startup) was not retained because
+standard I/O is a process-global resource that deployments, init systems, and
+libraries commonly use for terminals, journals, or human-readable logs. A framed
+binary protocol on those descriptors is easy to corrupt with accidental or
+debug output and is harder to keep separate from operator-facing process I/O.
+Standard input and output are also awkward as per-worker, dedicated channels in
+a pooled worker model and are less ergonomic for async supervisors that manage
+many concurrent full-duplex connections.
+
 ### 5.3 Worker Lifetime
 
 A worker may be reused only for requests that resolve to the same local
