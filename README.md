@@ -1,106 +1,100 @@
-# WFS - Web File System
+# NetixFS
 
-A simple HTTP server that manages user-specific files based on authentication tokens. Each user gets their own directory under a configurable root path.
+A Linux-only service that exposes selected POSIX filesystem operations through
+an HTTP(S) API. The service acts as an HTTP proxy for filesystem access,
+allowing remote clients to perform file and directory operations while
+preserving POSIX permission semantics.
+
+## Status
+
+Experimental, currently in development.
 
 ## Features
 
-- **Per-user file storage**: Files are stored in user-specific subdirectories based on the provided token
-- **Configuration file**: Default root path can be set via TOML configuration in `~/.config/wfs/config.toml`
-- **Command-line override**: Root path can be specified via `--root-path` argument
-- **HTTP Methods**:
-  - `GET`: Read a file
-  - `POST`: Create or overwrite a file
-  - `DELETE`: Remove a file
+### Core Architecture
 
-## Configuration
+- **Supervisor/Worker model**: Supervisor handles authentication, routing, and
+  worker lifecycle; workers execute filesystem operations under resolved local
+  identities
+- **POSIX permission preservation**: Delegates authorization to the Linux
+  kernel via per-worker UID/GID switching
+- **Root squash support**: Works on shared filesystems where root privileges
+  are insufficient
+- **Minimal capabilities**: Requires only `CAP_SETUID`, `CAP_SETGID`,
+  `CAP_KILL`, and optionally `CAP_NET_BIND_SERVICE`
 
-### TOML Configuration File
+### Security & Authentication
 
-Create a configuration file at `~/.config/wfs/config.toml`:
+- **JWT authentication**: Validates tokens from external identity providers
+  (Keycloak, Authentik, etc.)
+- **JWT validation**: Signature verification, expiration/not-before checks,
+  optional issuer and audience validation
+- **Multiple key sources**: Static public key (local/remote), JWKS
+  (local/remote) with automatic refresh
+- **NSS identity resolution**: Maps JWT username claim to local UID, primary
+  GID, and supplementary groups via Name Service Switch
+- **Path containment**: Rejects `..` components, validates symlink traversal,
+  enforces mount-boundary checks
+- **No broad capabilities**: Explicitly avoids `CAP_DAC_OVERRIDE`,
+  `CAP_FOWNER`, `CAP_SYS_ADMIN`
 
-```toml
-root_path = "/path/to/your/data/directory"
-```
+### Filesystem Operations
 
-If the file doesn't exist, the server defaults to `./data` in the current working directory.
+- **File operations**: Read, write (atomic replacement), delete, stat, stream
+  (tail -f style)
+- **Directory operations**: List (with pagination), create, delete, rename,
+  copy
+- **Link operations**: Read symlinks, create symlinks, create hard links
+- **Metadata operations**: Change mode (chmod), change group (chgrp), read
+  extended attributes
+- **Atomic writes**: File replacements use temporary files + atomic rename
+- **Range requests**: Partial content reads with `Range` header support
+- **ETags & preconditions**: HTTP precondition support (`If-Match`,
+  `If-None-Match`, `If-Unmodified-Since`)
 
-### Command-Line Argument
+### API Features
 
-You can override the root path when starting the server:
+- **Versioned API**: All endpoints under `/api/v1/roots/{root_id}/` prefix
+- **Multiple root support**: Configure multiple named filesystem roots
+- **Path encoding**: Supports both UTF-8 `path` and base64url `path_b64` for
+  non-UTF-8 paths
+- **Streaming**: Text file streaming with inotify-based change detection,
+  backpressure support
+- **Structured errors**: JSON error responses with request IDs, error codes,
+  and HTTP status
+- **CORS support**: Optional, disabled by default with explicit allowed origins
+  configuration
+- **Read-only mode**: Disables write operations for safe inspection deployments
 
-```bash
-cargo run -- --root-path /custom/path
-```
+### Configuration
 
-## Usage
+- **Multi-source**: TOML configuration file, environment variables (`NETIXFS_*`
+  prefix), command-line arguments
+- **Precedence**: Command-line > Environment > TOML file
+- **TLS support**: Native TLS or upstream TLS-terminating proxy
+- **Worker pool**: Configurable max workers, idle timeout, request timeout
+- **Limits**: Request body size, read size, concurrent requests, concurrent
+  streams
+- **Streaming limits**: Idle timeout, maximum duration, optional heartbeat
+- **Logging**: JSON or human-readable formats, configurable log level, optional
+  path redaction
 
-Start the server:
+### Observability
 
-```bash
-cargo run
-```
+- **Health endpoints**: `/healthz` (liveness), `/readyz` (readiness)
+- **Metrics**: Prometheus-compatible endpoint with request counts, latencies,
+  errors, worker stats
+- **Structured logging**: Request IDs, operation names, root IDs, subjects,
+  UIDs, GIDs in all logs
+- **Audit logging**: Security-relevant actions (writes, permission changes,
+  auth failures, identity resolution failures)
+- **Runtime configuration**: `/configz` endpoint shows effective configuration
+  with value provenance
 
-The server listens on `http://0.0.0.0:3000` by default.
+### Deployment
 
-### Authentication
-
-All requests must include an `Authorization` header with a Bearer token:
-
-```
-Authorization: Bearer <your-token>
-```
-
-The token is used as the subdirectory name under the root path. For example, with root path `/data` and token `user123`, files are stored in `/data/user123/`.
-
-### Endpoints
-
-All endpoints use the request path as the file path relative to the user's directory.
-
-#### GET
-
-Read a file's content:
-
-```bash
-curl -H "Authorization: Bearer mytoken" http://localhost:3000/path/to/file.txt
-```
-
-#### POST
-
-Create or overwrite a file:
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer mytoken" \
-  -H "Content-Type: text/plain" \
-  --data "file content" \
-  http://localhost:3000/path/to/file.txt
-```
-
-Maximum file size: 10MB
-
-#### DELETE
-
-Remove a file:
-
-```bash
-curl -X DELETE \
-  -H "Authorization: Bearer mytoken" \
-  http://localhost:3000/path/to/file.txt
-```
-
-## Project Structure
-
-```
-wfs/
-├── Cargo.toml
-├── README.md
-└── src/
-    └── main.rs
-```
-
-## Dependencies
-
-- axum 0.8.9
-- tokio (with net, rt, rt-multi-thread, tokio-macros, fs features)
-- serde (with derive feature)
-- toml 1.1.2
+- **System service**: Deployable as a Linux system service
+- **Containerized**: Works in containers with required filesystem mounts and
+  capabilities
+- **Reverse proxy**: Designed for deployment behind API gateways or
+  identity-aware proxies
