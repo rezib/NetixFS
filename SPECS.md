@@ -60,11 +60,13 @@ in [section 7](#7-authentication-boundary), and identity mapping is detailed in
 
 ### 3.3 Execution Model
 
-NetixFS must use the supervisor/worker model defined in
-[section 5](#5-software-architecture). The supervisor must handle the HTTP API,
-authentication, identity resolution, request validation, routing, cancellation,
-and worker lifecycle management. Workers must execute filesystem operations
-under the resolved UID, primary GID, and supplementary groups.
+NetixFS must use the router / supervisor / worker model defined in
+[section 5](#5-software-architecture). The router must handle the HTTP API,
+authentication, identity resolution, request validation, routing, and
+cancellation. The supervisor must own the worker pool, including spawn,
+idle expiration, and termination. The router must request and release worker
+access through the supervisor control channel. Workers must execute filesystem
+operations under the resolved UID, primary GID, and supplementary groups.
 
 The worker pool must be bounded, and each worker process must be bound to one
 resolved local identity for its lifetime. Worker pool limits and backpressure
@@ -100,16 +102,85 @@ The runtime environment must provide:
 
 ## 5. Software Architecture
 
-NetixFS must use a supervisor/worker architecture. The supervisor must own the
+NetixFS must use a router / supervisor / worker architecture implemented in a
+**single executable** with three internal process roles. The router must own the
 network-facing API, request validation, routing, cancellation, and worker
-lifecycle. Workers must own filesystem execution after switching to local Linux
-identities.
+access leases. The supervisor must own the worker pool, including when to
+`fork` or terminate workers, `pool.max_workers` enforcement, and
+`pool.idle_timeout`. Workers must own filesystem execution after switching to
+local Linux identities.
 
-### 5.1 Supervisor And Worker Model
+NetixFS must **not** use `exec` to transition between router, supervisor, or
+worker roles in a running deployment. Role changes must use `fork` and direct
+entry into role-specific code. The Tokio runtime must run only in the router
+process. The supervisor must be designed so that worker `fork` is safe, as
+defined in [section 5.1](#51-process-model).
 
-The supervisor must handle all network-facing and control-plane work. Workers
-must handle only filesystem operations received through their IPC socket after
-switching to the resolved local Linux identity.
+### 5.1 Process Model
+
+NetixFS must ship as one binary. Operators start a single **`netixfs`** process;
+router, supervisor, and worker are **process roles**, not separate command-line
+entry points. Role is determined by bootstrap and `fork` ancestry:
+
+| Role | Process | Responsibilities | Async runtime | May `fork` workers |
+|------|---------|------------------|---------------|-------------------|
+| Router | Parent after bootstrap | HTTP(S), JWT, NSS, routing, worker access leases | Tokio (multi-thread) | No |
+| Supervisor | Child of router | Worker pool, `fork` and termination, `pool.max_workers`, `pool.idle_timeout`, identity switching | None (blocking loop only) | Yes |
+| Worker | Child of supervisor | Filesystem execution over a per-worker IPC socket | Optional in worker only | No |
+
+The router must `fork` the supervisor before initializing Tokio. Workers must
+be created only by the supervisor. Implementations must not require operators to
+invoke separate subcommands or flags to select router, supervisor, or worker
+roles.
+
+The supervisor must not initialize Tokio, must not spawn Rust async thread
+pools, and must not create pthreads or use libraries that start background
+threads in supervisor mode. All worker processes must be created by `fork` from
+that single-threaded supervisor process.
+
+```mermaid
+flowchart TB
+  Client["HTTP clients"]
+
+  Router["Router role\nTokio, HTTP(S), JWT, NSS"]
+  Supervisor["Supervisor role\npool, fork, idle timeout"]
+  Worker1["Worker role"]
+  WorkerN["Worker role"]
+
+  Client -->|"HTTP(S)"| Router
+  Router -->|"fork before Tokio"| Supervisor
+  Supervisor -->|"fork when pool requires"| Worker1
+  Supervisor -->|"fork when pool requires"| WorkerN
+
+  Router <-->|"control socketpair\nRequestWorker, ReleaseWorker, Ping;\nSCM_RIGHTS passes router ipc fd"| Supervisor
+  Router <-->|"per-worker socketpair\nframed requests, responses,\nerrors, stream chunks"| Worker1
+  Router <-->|"per-worker socketpair"| WorkerN
+```
+
+#### Bootstrap
+
+Before initializing the Tokio runtime, the router process must:
+
+1. create an `AF_UNIX` `SOCK_STREAM` `socketpair` for the router↔supervisor
+   control channel;
+2. `fork` a supervisor child that keeps the supervisor end, closes the router
+   end, and enters the supervisor control loop without re-parsing command-line
+   arguments for role selection;
+3. close the supervisor end in the router parent and retain the router end for
+   the life of the router process;
+4. initialize Tokio only in the router parent.
+
+The control channel must not use a filesystem pathname in `/tmp`, configured
+roots, or other operator-facing directories.
+
+The router must **not** call `fork()` after the Tokio runtime is initialized.
+
+### 5.2 Router Responsibilities
+
+The router must handle all network-facing work and may hold exclusive leases on
+workers for in-flight requests. It must not decide when to `fork` or terminate
+worker processes. Workers must handle only filesystem operations received
+through their IPC socket after switching to the resolved local Linux identity.
 
 ```mermaid
 flowchart TD
@@ -133,26 +204,23 @@ flowchart TD
   J -- Yes --> S{Streaming request?}
   S -- Yes --> S1{limits.max_concurrent_streams available?}
   S1 -- No --> S2[429 Too Many Requests]
-  S1 -- Yes --> K{Idle worker for identity?}
+  S1 -- Yes --> K[RequestWorker from supervisor]
   S -- No --> K
-  K -- Yes --> M[Dispatch operation over socketpair]
-  K -- No --> L{pool.max_workers capacity available?}
-  L -- No --> L1[429 Too Many Requests]
-  L -- Yes --> L2[Create worker bound to identity]
-  L2 --> L3{Worker created?}
-  L3 -- No --> L4[503 Service Unavailable]
-  L3 -- Yes --> M
+  K --> K1{Worker access granted?}
+  K1 -- pool exhausted --> K2[429 Too Many Requests]
+  K1 -- spawn failed --> K3[503 Service Unavailable]
+  K1 -- Ok --> M[Dispatch operation over socketpair]
   M --> N[Worker performs descriptor-oriented filesystem operation]
   M --> BP[Propagate HTTP backpressure through bounded IPC frames]
   BP --> N
   N --> O{Operation completed?}
-  O -- Success --> O1[Add CORS headers when enabled, then return response or stream]
-  O -- Error --> O2[Add CORS headers when enabled, then return structured error]
-  O -- Timeout or disconnect --> O3[Cancel operation and release resources]
+  O -- Success --> O1[ReleaseWorker, add CORS headers when enabled, return response or stream]
+  O -- Error --> O2[ReleaseWorker, add CORS headers when enabled, return structured error]
+  O -- Timeout or disconnect --> O3[Cancel operation, ReleaseWorker, release resources]
 ```
 
-Before dispatching to a worker, the supervisor must complete every check that
-does not require filesystem access as the target user:
+Before dispatching to a worker, the router must complete every check that does
+not require filesystem access as the target user:
 
 - request ID assignment or validation, as defined in
   [section 13.1](#131-request-ids);
@@ -167,20 +235,23 @@ does not require filesystem access as the target user:
 - authorization and containment checks that are safe to perform before worker
   execution, as defined in [section 9](#9-authorization-model) and
   [section 10](#10-http-api-design);
-- request body, directory, stream, concurrency, and worker pool limits, as
-  defined in [section 5](#5-software-architecture),
+- request body, directory, stream, and HTTP concurrency limits, as defined in
+  [section 5](#5-software-architecture),
   [section 10](#10-http-api-design), [section 11](#11-http-api-endpoints), and
   [section 12](#12-configuration);
-- worker selection or creation for the resolved local identity;
+- a `RequestWorker` control message to the supervisor for the resolved local
+  identity;
+- a `ReleaseWorker` control message when the router no longer needs exclusive
+  access to the worker for the current request;
 - cancellation, timeout, backpressure, and logging context, as defined in
   [section 5](#5-software-architecture) and
   [section 13](#13-observability).
 
-The supervisor must not perform client-requested filesystem operations directly.
-It may only perform setup and control-plane work: worker creation, IPC
-management, configured root resolution, service-limit enforcement, cancellation,
-and worker termination. The supervisor capability model is defined in
-[section 6](#6-security-model).
+The router must not perform client-requested filesystem operations directly,
+must not `fork` worker processes, and must not command worker termination for
+idle timeout or routine pool management. It must send operation frames to
+workers over the router-held IPC socket endpoint while it holds a worker lease.
+The privilege model is defined in [section 6](#6-security-model).
 
 Workers must execute filesystem operations after UID, primary GID, and
 supplementary group switching. Each worker must be bound to one resolved local
@@ -194,40 +265,126 @@ unbounded workers, queues, buffers, or streams.
 
 The following limits must be enforced:
 
-- `pool.max_workers` is the maximum number of live worker processes
-  across all local identities.
-- A worker should execute at most one active filesystem operation at a time.
-- `limits.max_concurrent_requests` caps in-flight HTTP requests before worker
-  dispatch.
+- `pool.max_workers` is enforced by the supervisor; when `RequestWorker` returns
+  `pool_exhausted`, the router must fail with `429 Too Many Requests`.
+- A worker should execute at most one active filesystem operation at a time while
+  leased to the router.
+- `limits.max_concurrent_requests` caps in-flight HTTP requests before
+  `RequestWorker`.
 - `limits.max_concurrent_streams` caps active streaming responses. Stream
   requests above this limit must be rejected before response headers are sent.
 
-Requests that exceed concurrency or worker availability limits must fail with
-`429 Too Many Requests`; worker creation failures caused by internal or
-operating-system failures must fail with `503 Service Unavailable`.
+When `RequestWorker` returns `spawn_failed`, the router must fail with
+`503 Service Unavailable`.
 
-### 5.2 Worker Communication
+### 5.3 Supervisor Control Plane
 
-Supervisor and worker processes must communicate through per-worker Unix domain
-socket pairs created with `socketpair`. Unlike filesystem-named Unix sockets,
-socket pairs are anonymous, already-connected file descriptors. They require no
-listener path, cannot be discovered by opening a pathname, and avoid lifecycle
-and permission risks in `/tmp`, configured roots, or other operator-facing
-directories.
+The router and supervisor must communicate over the bootstrap control channel
+using length-prefixed bounded frames. Control messages must not use HTTP or
+JSON. The router must send resolved numeric identities when requesting worker
+access; the supervisor must not perform JWT validation or NSS resolution.
+
+The supervisor must own all worker pool lifecycle decisions. It must decide
+when to reuse an idle worker, when to `fork` a new worker, and when to terminate
+a worker. The router must only request and release exclusive worker access.
+
+#### Control messages
+
+| Message | Direction | Payload | Response |
+|---------|-----------|---------|----------|
+| `RequestWorker` | router → supervisor | `uid`, `primary_gid`, `supplementary_gids[]` | `Ok { pid }` and router IPC file descriptor sent with `SCM_RIGHTS`, or `Err { pool_exhausted }`, or `Err { spawn_failed }` |
+| `ReleaseWorker` | router → supervisor | `pid`, `reason` | `Ok` or `Err { reason }` |
+| `Ping` | router → supervisor | — | `Pong` |
+
+`RequestWorker` asks the supervisor for exclusive access to a worker bound to the
+supplied identity. The supervisor must prefer reusing an idle worker for the
+same identity before `fork`ing a new worker. `RequestWorker` must bind the
+worker process to the supplied identity for its lifetime. The supervisor must
+apply `setgid`, `setgroups`, and `setuid` in a newly `fork`ed worker child
+before entering worker code.
+
+`ReleaseWorker` returns exclusive access to the supervisor. The `reason` field
+must distinguish at least `operation_complete`, `cancelled`, `client_disconnect`,
+and `cancel_failed`. After `ReleaseWorker`, the supervisor must mark the worker
+idle and start or refresh the `pool.idle_timeout` timer for that worker.
+
+The supervisor must enforce `pool.max_workers` across all identities and refuse
+`RequestWorker` with `pool_exhausted` when at capacity. The supervisor must not
+terminate workers that are currently leased to the router. On `ReleaseWorker`
+with `cancel_failed`, the supervisor may terminate the worker immediately
+instead of returning it to the idle pool.
+
+The supervisor must terminate idle workers when `pool.idle_timeout` expires,
+terminate workers on service shutdown, and may use `CAP_KILL` when required after
+a worker has switched UID, as defined in [section 6](#6-security-model).
+
+The supervisor must not receive JWTs, HTTP request bodies, or filesystem
+operation paths on the control channel. The router must send operation details
+to the worker over worker IPC after `RequestWorker` succeeds.
+
+When `RequestWorker` returns `pool_exhausted`, the router must fail the client
+request with `429 Too Many Requests`. When it returns `spawn_failed`, the
+router must fail with `503 Service Unavailable`.
+
+The router must send `ReleaseWorker` after operation completion, stream end,
+client disconnect, and after a cancellation attempt when the worker is no longer
+needed for the current request.
+
+#### Worker creation
+
+When the supervisor decides to add a worker to the pool during `RequestWorker`,
+it must:
+
+1. call `socketpair` for the router↔worker IPC channel;
+2. `fork` a worker child;
+3. in the child: close the router IPC endpoint, move the worker endpoint to a
+   fixed descriptor (for example file descriptor 3), apply `setgid`, `setgroups`,
+   and `setuid`, drop capabilities, and enter the worker role without returning
+   to supervisor logic or re-parsing command-line arguments for role selection;
+4. in the supervisor parent: close the worker endpoint and send the router
+   endpoint to the router over the control channel with `SCM_RIGHTS`, together
+   with the child process ID.
+
+`SCM_RIGHTS` is Linux ancillary data sent with `sendmsg` on a Unix domain
+socket. It duplicates an open file descriptor from the sender into the
+receiver's file descriptor table. NetixFS uses it so the supervisor process can
+hand the router end of a per-worker `socketpair` to the router process over the
+control channel. This is the only required use of `SCM_RIGHTS` in NetixFS.
+
+Worker children must terminate with `_exit` rather than `exit` so that
+supervisor global state is not torn down from a forked child.
+
+Fork-only workers inherit the supervisor address space at fork time
+(copy-on-write). Implementations should keep supervisor-mode memory use small
+and must not retain secrets in supervisor memory that workers do not require.
+
+### 5.4 Worker Communication
+
+The supervisor and each worker must share a per-worker Unix domain socket pair
+created with `socketpair`. The router must receive and retain the router end
+from the supervisor over the control channel. Unlike filesystem-named Unix
+sockets, socket pairs are anonymous, already-connected file descriptors. They
+require no listener path, cannot be discovered by opening a pathname, and avoid
+lifecycle and permission risks in `/tmp`, configured roots, or other
+operator-facing directories.
 
 Socket pairs should be used because they are local-only, bidirectional,
-compatible with async runtimes, and suitable for both short request/response
-operations and long-lived streaming responses. The supervisor must create each
-pair, pass one endpoint to the worker, and keep the other endpoint.
+compatible with async runtimes in the router, and suitable for both short
+request/response operations and long-lived streaming responses.
 
-The IPC protocol should use bounded frames:
+Operation frames (paths, operation codes, request bodies, stream control, and
+cancellation) must travel only on the router↔worker IPC channel. Identity for
+the worker process is established solely through `RequestWorker` on the control
+channel.
+
+The worker IPC protocol must use bounded frames:
 
 - one frame type for operation requests;
 - one frame type for structured responses;
 - one frame type for structured errors;
 - one frame type for bounded byte chunks used by streaming reads.
 
-Shared task queues should not be used for worker IPC because they make
+Shared task queues must not be used for worker IPC because they make
 per-request cancellation, backpressure, identity isolation, and stream ownership
 harder to reason about.
 
@@ -236,13 +393,12 @@ socket pairs. Neither was rejected because of worker UID, primary GID, or
 supplementary group switching: file descriptors inherited at worker creation
 remain usable after identity change and capability dropping.
 
-A design based on two unnamed pipes (supervisor-to-worker and
-worker-to-supervisor) can provide bidirectional byte streams and can pass
-endpoints to each child at spawn time, similar to a socket pair. It was not
-retained because it uses four file descriptors per worker instead of two,
-splits control and data across two kernel objects, and does not offer a single
-full-duplex channel for interleaved request, response, error, cancellation, and
-stream-chunk frames.
+A design based on two unnamed pipes (router-to-worker and worker-to-router) can
+provide bidirectional byte streams and can pass endpoints to each child at spawn
+time, similar to a socket pair. It was not retained because it uses four file
+descriptors per worker instead of two, splits control and data across two kernel
+objects, and does not offer a single full-duplex channel for interleaved
+request, response, error, cancellation, and stream-chunk frames.
 
 Repurposing `stdin` and `stdout` as the IPC channel (typically by wiring pipe
 ends onto file descriptors 0 and 1 at worker startup) was not retained because
@@ -251,51 +407,63 @@ libraries commonly use for terminals, journals, or human-readable logs. A framed
 binary protocol on those descriptors is easy to corrupt with accidental or
 debug output and is harder to keep separate from operator-facing process I/O.
 Standard input and output are also awkward as per-worker, dedicated channels in
-a pooled worker model and are less ergonomic for async supervisors that manage
-many concurrent full-duplex connections.
+a pooled worker model and are less ergonomic for async routers that manage many
+concurrent full-duplex connections.
 
-### 5.3 Worker Lifetime
+### 5.5 Worker Lifetime
 
 A worker may be reused only for requests that resolve to the same local
-identity. It remains eligible for reuse while it is idle and has not exceeded
-`pool.idle_timeout`.
+identity. The supervisor must track whether each worker is **leased** to the
+router or **idle** in the pool.
 
-`pool.idle_timeout` defines how long an idle worker may remain alive
-after its last completed operation. When the timeout expires, the supervisor
-should terminate the worker and release its resources.
+While leased to the router, a worker must not be expired by `pool.idle_timeout`
+or terminated for routine pool management. When the router sends `ReleaseWorker`,
+the supervisor must mark the worker idle. A worker remains eligible for reuse
+while idle and until the supervisor terminates it.
 
-Active workers must not be expired by `pool.idle_timeout`. Non-streaming
-operations must be bounded by `pool.request_timeout`; if the timeout is
-exceeded, the supervisor must cancel the operation and may terminate the worker
-if cancellation cannot complete cleanly.
+`pool.idle_timeout` defines how long an idle worker may remain alive after the
+supervisor receives `ReleaseWorker`. When the timeout expires, the supervisor
+must terminate the worker process and release its resources. The router must not
+command worker termination for idle timeout.
+
+Non-streaming operations must be bounded by `pool.request_timeout`. If the
+timeout is exceeded, the router must cancel the operation over worker IPC and
+then send `ReleaseWorker` with an appropriate reason. On `ReleaseWorker` with
+`cancel_failed`, the supervisor may terminate the worker instead of returning
+it to the idle pool.
 
 Streaming operations are bounded by stream-specific idle timeout, maximum
 duration, heartbeat, client disconnect, and cancellation rules. When a stream
-ends, the worker becomes idle again and is subject to
-`pool.idle_timeout`.
+ends or the client disconnects, the router must send `ReleaseWorker` and the
+supervisor must apply `pool.idle_timeout` from that release.
 
 Workers must release file descriptors, inotify watches, IPC buffers, and other
-resources when an operation completes, when the supervisor cancels the request,
-or when the client disconnects. Detailed configuration keys are defined in
-[section 12](#12-configuration).
+resources when an operation completes, when the router cancels the operation
+over worker IPC, or when the client disconnects. Detailed configuration keys are
+defined in [section 12](#12-configuration).
 
 ## 6. Security Model
 
-The supervisor must be able to start without root privileges. It must run under
-a dedicated service account and receive only the capabilities required for
-NetixFS operation:
+NetixFS must be able to start without root privileges. The router and supervisor
+must run under a dedicated service account. Privileged Linux capabilities must
+be split by role:
 
-- `CAP_SETUID`: required to create workers running as resolved local UIDs;
-- `CAP_SETGID`: required to set the worker primary GID and supplementary groups;
-- `CAP_KILL`: required only if the supervisor must forcibly terminate workers
-  after they have switched to a different UID;
-- `CAP_NET_BIND_SERVICE`: required only when NetixFS binds directly to a TCP
-  port below 1024.
+- **Supervisor process:** `CAP_SETUID` and `CAP_SETGID` to create workers
+  running as resolved local UIDs with the correct primary GID and supplementary
+  groups; `CAP_KILL` when the supervisor must forcibly terminate workers after
+  they have switched to a different UID.
+- **Router process:** `CAP_NET_BIND_SERVICE` only when NetixFS binds directly to
+  a TCP port below 1024. The router must drop `CAP_SETUID` and `CAP_SETGID` at
+  router entry when file capabilities or ambient capabilities would otherwise
+  grant them to the shared executable.
 
-The supervisor must not require broad filesystem-bypass capabilities, including
-`CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_FOWNER`, or `CAP_SYS_ADMIN`.
-Deployments that cannot provide the required capability model must fail closed
-rather than running the supervisor as root.
+Neither the router nor the supervisor must require broad filesystem-bypass
+capabilities, including `CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_FOWNER`,
+or `CAP_SYS_ADMIN`. Deployments that cannot provide the required capability
+model must fail closed rather than running NetixFS as root.
+
+Privileged worker lifecycle operations must run only in the supervisor process
+so the Tokio router minimizes privileged surface area.
 
 The external identity provider must be responsible for authenticating users and
 issuing JWTs. NetixFS must validate token signatures and configured token
@@ -2032,11 +2200,11 @@ listener, and the runtime configuration (`/configz`) listener. Startup failure
 messages must identify the setting and the error, but must not leak sensitive
 rejected values such as tokens, inline secrets, or credentials.
 
-The following are **not** configuration errors: the supervisor may start, but
+The following are **not** configuration errors: the router may start, but
 `/readyz` may report not ready, when configuration is valid but a runtime
 dependency is temporarily unavailable (for example, a configured JWT public key
-path whose file is not yet readable, or a worker pool that has not finished
-initializing).
+path whose file is not yet readable, the supervisor control channel is not yet
+available, or a worker pool that has not finished initializing).
 
 Examples of configuration errors (all prevent startup):
 
@@ -2051,9 +2219,10 @@ Examples of configuration errors (all prevent startup):
 | Invalid TOML or unreadable config file when a config file path is set | Exit. |
 
 
-**Start** means the supervisor process is running with validated configuration
-and has bound the listeners permitted by that configuration. **Ready** means
-`GET /readyz` returns `200 OK` as defined in [section 13.5](#135-health-and-readiness).
+**Start** means the router process is running with validated configuration,
+has forked the supervisor child, and has bound the listeners permitted by that
+configuration. **Ready** means `GET /readyz` returns `200 OK` as defined in
+[section 13.5](#135-health-and-readiness).
 
 ### 12.3 Configuration Settings
 
@@ -2147,7 +2316,7 @@ only when native TLS is enabled.
 ##### TLS private key path
 
 Points to the private key used by the native TLS listener. The key must be
-readable by the supervisor service account and protected from other users.
+readable by the NetixFS service account and protected from other users.
 
 - TOML setting: `tls.key_path`.
 - Command-line argument: `--tls-key-path`.
@@ -2914,9 +3083,9 @@ NetixFS should expose:
 - `GET /healthz`: liveness check;
 - `GET /readyz`: readiness check.
 
-`/healthz` should return `200 OK` when the supervisor process is alive and able
-to run its event loop. It should not perform expensive filesystem, identity, or
-network checks.
+`/healthz` should return `200 OK` when the router process is alive and able to
+run its Tokio event loop. It should not perform expensive filesystem, identity,
+or network checks.
 
 Example liveness response:
 
@@ -2930,11 +3099,12 @@ Content-Type: application/json
 ```
 
 `/readyz` should return `200 OK` only when NetixFS is able to accept useful
-traffic. It should check JWT key availability, metrics and worker pool
+traffic. It should check JWT key availability, supervisor control-channel
+reachability (for example through `Ping` / `Pong`), metrics and worker pool
 initialization, and whether required service limits are valid. It may also
 include degraded warnings for non-fatal conditions.
 
-Once the supervisor is running, configuration has already validated successfully
+Once the router is running, configuration has already validated successfully
 at startup (see [section 12.2](#122-configuration-validation-and-startup)). The
 `configuration` readiness check must therefore report `"ok"`. Readiness
 failures must be reported through the other checks, such as `jwt_keys` or
@@ -2984,7 +3154,7 @@ runtime configuration:
 - `GET /configz`: effective runtime configuration and value provenance.
 
 `/configz` is available only after configuration has validated successfully and
-the supervisor has started. If configuration validation fails, NetixFS must not
+the router has started. If configuration validation fails, NetixFS must not
 start and `/configz` must not be exposed.
 
 `/configz` should be exposed only when
@@ -3089,6 +3259,9 @@ The design must address:
 
 - JWT signature validation and configured issuer and audience validation;
 - local username-to-UID/GID/supplementary-groups resolution;
+- router / supervisor / worker process separation, fork-only role transitions,
+  capability split between the Tokio router and the supervisor, and
+  supervisor-owned worker pool lifecycle with router access requests only;
 - privilege dropping and per-worker UID, primary GID, and supplementary group
   switching;
 - worker process pooling and identity isolation;
@@ -3153,11 +3326,13 @@ planning work and is not itself a conformance requirement.
    containment checks. Include Linux integration tests for traversal and
    containment behavior.
 
-4. Supervisor/worker execution model:
-   Add the non-root supervisor, capability requirements, worker creation,
-   per-worker Unix domain socket pairs, framed IPC, worker identity switching,
-   and the rule that each worker is bound to one resolved local identity for its
-   lifetime.
+4. Router / supervisor / worker execution model:
+   Add one binary with internal router, supervisor, and worker roles; router
+   bootstrap of the supervisor before Tokio; fork-only worker creation;
+   supervisor-owned pool with `RequestWorker` / `ReleaseWorker` control plane,
+   framing, and `SCM_RIGHTS` handoff; per-worker Unix domain socket pairs and
+   framed router↔worker IPC; capability split by role; and the rule that each
+   worker is bound to one resolved local identity for its lifetime.
 
 5. Read-only filesystem APIs:
    Add Stat API, Directory API listing with limits and cursors, file reads
@@ -3170,9 +3345,10 @@ planning work and is not itself a conformance requirement.
    mode, request body limits, and structured error mapping.
 
 7. Worker pool and backpressure:
-   Add worker pool limits, idle expiration, request timeout handling,
-   cancellation, bounded pending work, stream limits, and `429` / `503` behavior
-   when capacity is exhausted or workers cannot be created.
+   Add supervisor-owned pool limits, `RequestWorker` / `ReleaseWorker` control
+   plane, idle expiration, request timeout handling, cancellation,
+   bounded pending work, stream limits, and `429` / `503` behavior when capacity
+   is exhausted or workers cannot be created.
 
 8. Streaming:
    Add text-only stream support with `tail -f` descriptor-following
@@ -3197,7 +3373,7 @@ planning work and is not itself a conformance requirement.
     failure messages.
 
 12. Cross-origin resource sharing (CORS):
-    Add supervisor CORS handling on `/api/v1/**` when `cors.enabled=true`.
+    Add router CORS handling on `/api/v1/**` when `cors.enabled=true`.
 
 13. Full specification verification:
     Add end-to-end Linux integration tests for permission behavior, symlink
