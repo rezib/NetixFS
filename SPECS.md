@@ -2222,7 +2222,7 @@ Examples of configuration errors (all prevent startup):
 **Start** means the router process is running with validated configuration,
 has forked the supervisor child, and has bound the listeners permitted by that
 configuration. **Ready** means `GET /readyz` returns `200 OK` as defined in
-[section 13.5](#135-health-and-readiness).
+[section 13.4](#134-health-and-readiness).
 
 ### 12.3 Configuration Settings
 
@@ -2680,8 +2680,8 @@ deletion semantics harder to reason about.
 
 ##### Allow symbolic link creation
 
-Enables symbolic-link creation. Symlinks can complicate containment, auditing,
-and later path resolution.
+Enables symbolic-link creation. Symlinks can complicate containment and later
+path resolution.
 
 - TOML setting: `operations.allow_symlink_create`.
 - Command-line argument: `--allow-symlink-create`.
@@ -2863,7 +2863,7 @@ while human-readable formats may help local debugging.
 
 ##### Log path redaction
 
-Controls whether paths are redacted in logs and audit events by default.
+Controls whether paths are redacted in logs by default.
 Disabling it improves detail but can expose sensitive filenames and directory
 structures.
 
@@ -2942,8 +2942,8 @@ operator-facing network explicitly protects the endpoint.
 ## 13. Observability
 
 NetixFS should provide production-grade observability through structured logs,
-request IDs, audit logs, metrics, health/readiness endpoints, and runtime
-configuration introspection.
+request IDs, metrics, health/readiness endpoints, and runtime configuration
+introspection.
 
 ### 13.1 Request IDs
 
@@ -2995,46 +2995,7 @@ Example request log:
 }
 ```
 
-### 13.3 Audit Logs
-
-Audit logs must support accountability and security review. They should answer
-who attempted or performed a security-relevant action, what target was involved,
-and whether the action succeeded or was rejected. Audit logs may use the same
-logging backend and structured JSON format as operational logs, but their schema
-should be more stable, they should be harder to disable accidentally, and they
-should usually have longer retention.
-
-Audit logs must be emitted for write operations, permission-changing operations,
-link creation, recursive operations when enabled, authentication failures,
-identity resolution failures, and rejected service-safety checks.
-
-Audit events should include the authenticated subject, resolved UID, primary
-GID, supplementary groups, operation, root ID, target path or redacted path,
-result, HTTP status, errno when applicable, request ID, and timestamp.
-
-Example audit log:
-
-```json
-{
-  "timestamp": "2026-05-18T12:35:10.012Z",
-  "level": "info",
-  "message": "audit event",
-  "event": "filesystem_write",
-  "request_id": "req_01HY9Z5AZZSQPK9VC1M0C2B6SF",
-  "operation": "replace_file",
-  "root_id": "home",
-  "path": "[redacted]",
-  "subject": "alice",
-  "uid": 1000,
-  "gid": 1000,
-  "groups": [1000, 1001],
-  "result": "success",
-  "status": 200,
-  "errno": null
-}
-```
-
-### 13.4 Metrics
+### 13.3 Metrics
 
 Metrics should include request counts, latencies, error counts, active requests,
 worker pool size, worker creation failures, active streams, stream disconnects,
@@ -3073,7 +3034,7 @@ Metrics labels must avoid high-cardinality or sensitive values such as raw
 paths, subjects, request IDs, or file names. Route labels should use route
 templates such as `/api/v1/roots/{root_id}/file`, not concrete request paths.
 
-### 13.5 Health And Readiness
+### 13.4 Health And Readiness
 
 Health and readiness endpoints must not require authentication unless the
 deployment explicitly enables authenticated probes.
@@ -3146,7 +3107,7 @@ Content-Type: application/json
 }
 ```
 
-### 13.6 Runtime Configuration
+### 13.5 Runtime Configuration
 
 NetixFS should expose an operator-facing endpoint for inspecting the effective
 runtime configuration:
@@ -3368,9 +3329,8 @@ planning work and is not itself a conformance requirement.
     cases.
 
 11. Observability and operations hardening:
-    Round out operational logs, audit logs, metrics, health and readiness
-    behavior, path redaction, configuration validation, and operator-facing
-    failure messages.
+    Round out operational logs, metrics, health and readiness behavior, path
+    redaction, configuration validation, and operator-facing failure messages.
 
 12. Cross-origin resource sharing (CORS):
     Add router CORS handling on `/api/v1/**` when `cors.enabled=true`.
