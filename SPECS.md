@@ -61,11 +61,12 @@ in [section 7](#7-authentication-boundary), and identity mapping is detailed in
 ### 3.3 Execution Model
 
 NetixFS must use the router / supervisor / worker model defined in
-[section 5](#5-software-architecture). The router must handle the HTTP API,
-authentication, identity resolution, request validation, routing, and
-cancellation. The supervisor must own the worker pool, including spawn,
-idle expiration, and termination. The router must request and release worker
-access through the supervisor control channel. Workers must execute filesystem
+[section 5](#5-software-architecture). The router must load and serve
+network-facing protocols, including the required HTTP API v1 protocol, and must
+handle authentication, identity resolution, request validation, routing, and
+cancellation. The supervisor must own the worker pool, including spawn, idle
+expiration, and termination. The router must request and release worker access
+through the supervisor control channel. Workers must execute filesystem
 operations under the resolved UID, primary GID, and supplementary groups.
 
 The worker pool must be bounded, and each worker process must be bound to one
@@ -98,13 +99,14 @@ The runtime environment must provide:
 - access to the filesystem roots that NetixFS is allowed to expose;
 - local user and group resolution through NSS;
 - the minimum Linux capabilities required by the selected privilege model;
-- network access for the HTTP(S) listener and, if used, JWT key discovery.
+- network access for configured protocol listeners and, if used, JWT key
+  discovery.
 
 ## 5. Software Architecture
 
 NetixFS must use a router / supervisor / worker architecture implemented in a
 **single executable** with three internal process roles. The router must own the
-network-facing API, request validation, routing, cancellation, and worker
+network-facing protocols, request validation, routing, cancellation, and worker
 access leases. The supervisor must own the worker pool, including when to
 `fork` or terminate workers, `pool.max_workers` enforcement, and
 `pool.idle_timeout`. Workers must own filesystem execution after switching to
@@ -124,7 +126,7 @@ entry points. Role is determined by bootstrap and `fork` ancestry:
 
 | Role | Process | Responsibilities | Async runtime | May `fork` workers |
 |------|---------|------------------|---------------|-------------------|
-| Router | Parent after bootstrap | HTTP(S), JWT, NSS, routing, worker access leases | Tokio (multi-thread) | No |
+| Router | Parent after bootstrap | Protocol loading, HTTP(S), JWT, NSS, routing, worker access leases | Tokio (multi-thread) | No |
 | Supervisor | Child of router | Worker pool, `fork` and termination, `pool.max_workers`, `pool.idle_timeout`, identity switching | None (blocking loop only) | Yes |
 | Worker | Child of supervisor | Filesystem execution over a per-worker IPC socket | Optional in worker only | No |
 
@@ -140,14 +142,14 @@ that single-threaded supervisor process.
 
 ```mermaid
 flowchart TB
-  Client["HTTP clients"]
+  Client["Network clients"]
 
-  Router["Router role\nTokio, HTTP(S), JWT, NSS"]
+  Router["Router role\nTokio, protocol registry,\nHTTP(S), JWT, NSS"]
   Supervisor["Supervisor role\npool, fork, idle timeout"]
   Worker1["Worker role"]
   WorkerN["Worker role"]
 
-  Client -->|"HTTP(S)"| Router
+  Client -->|"enabled protocols\nHTTP API v1, future API v2/WebDAV"| Router
   Router -->|"fork before Tokio"| Supervisor
   Supervisor -->|"fork when pool requires"| Worker1
   Supervisor -->|"fork when pool requires"| WorkerN
@@ -177,15 +179,27 @@ The router must **not** call `fork()` after the Tokio runtime is initialized.
 
 ### 5.2 Router Responsibilities
 
-The router must handle all network-facing work and may hold exclusive leases on
-workers for in-flight requests. It must not decide when to `fork` or terminate
-worker processes. Workers must handle only filesystem operations received
-through their IPC socket after switching to the resolved local Linux identity.
+The router must handle all network-facing protocol work and may hold exclusive
+leases on workers for in-flight requests. It must not decide when to `fork` or
+terminate worker processes. Workers must handle only filesystem operations
+received through their IPC socket after switching to the resolved local Linux
+identity.
+
+The router must expose network behavior through modular protocols. API v1 is
+the initial required HTTP protocol, and the router design must allow future
+protocols, such as an API v2 HTTP protocol or a WebDAV protocol, to be loaded
+and served without changing the router / supervisor / worker process model.
+Each protocol must define its own routes, wire behavior, request classification,
+and whether CORS, authentication, and other HTTP-specific concerns apply.
+Protocols that perform filesystem operations must share the same router
+validation, worker lease, and router↔worker IPC execution path. Multiple
+protocols may be served concurrently when configuration allows.
 
 ```mermaid
 flowchart TD
-  A[HTTP request] --> A1[Assign or validate request ID]
-  A1 --> A2{CORS preflight OPTIONS on /api/v1?}
+  A[Protocol request] --> A0[Classify protocol and route]
+  A0 --> A1[Assign or validate request ID]
+  A1 --> A2{API v1 CORS preflight OPTIONS on /api/v1?}
   A2 -- Yes, cors enabled --> A2a[Respond 204 or 403 without JWT or workers]
   A2 -- No --> B{limits.max_concurrent_requests available?}
   B -- No --> B1[429 Too Many Requests]
@@ -211,7 +225,7 @@ flowchart TD
   K1 -- spawn failed --> K3[503 Service Unavailable]
   K1 -- Ok --> M[Dispatch operation over socketpair]
   M --> N[Worker performs descriptor-oriented filesystem operation]
-  M --> BP[Propagate HTTP backpressure through bounded IPC frames]
+  M --> BP[Propagate protocol backpressure through bounded IPC frames]
   BP --> N
   N --> O{Operation completed?}
   O -- Success --> O1[ReleaseWorker, add CORS headers when enabled, return response or stream]
@@ -224,8 +238,9 @@ not require filesystem access as the target user:
 
 - request ID assignment or validation, as defined in
   [section 13.1](#131-request-ids);
-- cross-origin resource sharing (CORS) on `/api/v1/**` when `cors.enabled=true`,
-  as defined in [section 10.7](#107-cross-origin-resource-sharing-cors).
+- cross-origin resource sharing (CORS) for the API v1 protocol on `/api/v1/**`
+  when `cors.enabled=true`, as defined in
+  [section 10.7](#107-cross-origin-resource-sharing-cors).
 - authentication and JWT claim validation, as defined in
   [section 7](#7-authentication-boundary), except for CORS preflight requests;
 - username extraction and NSS identity resolution, as defined in
@@ -584,21 +599,24 @@ including:
 - maximum number of directory entries returned in one response;
 - symlink traversal policy.
 
-## 10. HTTP API Design
+## 10. HTTP API v1 Protocol Design
 
-The API must be explicit, stable, and machine-friendly.
+The HTTP API v1 protocol must be explicit, stable, and machine-friendly. It is
+the initial required protocol served by the router protocol registry. Future
+incompatible HTTP APIs must be exposed as separate protocol versions, such as an
+API v2 protocol, rather than by changing API v1 behavior.
 
 ### 10.1 API Version Prefix
 
-All versioned HTTP API routes must use the `/api/v1` prefix. The prefix is part
-of the stable route contract and reserves space for future incompatible API
-versions without changing the host, listener, or deployment topology. Endpoints
-outside the versioned API, such as health, readiness, metrics, and diagnostics
-endpoints, are not required to use this prefix.
+All HTTP API v1 protocol routes must use the `/api/v1` prefix. The prefix is
+part of the stable API v1 route contract and reserves space for future
+incompatible API protocols without changing the host, listener, or deployment
+topology. Endpoints outside the API v1 protocol, such as health, readiness,
+metrics, and diagnostics endpoints, are not required to use this prefix.
 
 ### 10.2 Root Scopes
 
-Filesystem endpoints are scoped to a configured root identifier:
+HTTP API v1 filesystem endpoints are scoped to a configured root identifier:
 
 ```text
 /api/v1/roots/{root_id}/...
@@ -853,10 +871,10 @@ Retry-After: 2
 
 ### 10.7 Cross-Origin Resource Sharing (CORS)
 
-NetixFS must support Cross-Origin Resource Sharing (CORS) so browser-based
-clients, such as single-page applications and internal file UIs, can call the
-HTTP API from a different origin than the API host. CORS is optional and
-disabled by default. Configuration is defined in
+NetixFS must support Cross-Origin Resource Sharing (CORS) for the HTTP API v1
+protocol so browser-based clients, such as single-page applications and internal
+file UIs, can call API v1 from a different origin than the API host. CORS is
+optional and disabled by default. Configuration is defined in
 [section 12](#12-configuration).
 
 #### 10.7.1 Purpose and threat model
@@ -883,20 +901,21 @@ not be used when `cors.allow_credentials=true`.
 
 Implementations may load and validate `cors.*` settings before CORS runtime
 support is implemented. Until CORS is implemented, as described in
-[section 16](#16-implementation-plan) step 13, NetixFS must not emit
+[section 16](#16-implementation-plan) step 12, NetixFS must not emit
 `Access-Control-*` headers or handle CORS preflight even if `cors.enabled=true`.
 
 #### 10.7.3 Scope (routes and listeners)
 
-When `cors.enabled=true`, CORS applies only on the main HTTP API listener and
-only to versioned filesystem routes:
+When `cors.enabled=true`, CORS applies only on the main HTTP listener and only
+to HTTP API v1 protocol filesystem routes:
 
 ```text
 /api/v1/**
 ```
 
-This includes all methods documented in [section 11](#11-http-api-endpoints),
-including `OPTIONS` used for preflight.
+This includes all methods documented in
+[section 11](#11-http-api-v1-protocol-endpoints), including `OPTIONS` used for
+preflight.
 
 CORS must not apply by default to:
 
@@ -1086,7 +1105,7 @@ Content-Type: application/json
 When `cors.enabled=false`, browsers block cross-origin reads in JavaScript even
 if the server would otherwise return `200 OK` to a non-browser client.
 
-## 11. HTTP API Endpoints
+## 11. HTTP API v1 Protocol Endpoints
 
 ### 11.1 Stat API
 
@@ -2329,8 +2348,9 @@ readable by the NetixFS service account and protected from other users.
 
 ##### CORS enabled
 
-Enables Cross-Origin Resource Sharing on `/api/v1/**` of the main HTTP listener.
-When disabled, NetixFS must not emit `Access-Control-*` headers.
+Enables Cross-Origin Resource Sharing on HTTP API v1 protocol routes under
+`/api/v1/**` of the main HTTP listener. When disabled, NetixFS must not emit
+`Access-Control-*` headers.
 
 - TOML setting: `cors.enabled`.
 - Command-line argument: `--cors-enabled`.
@@ -3270,10 +3290,11 @@ The following sequence is a proposed implementation roadmap, ordered from a
 minimal working prototype to full specification coverage. It is guidance for
 planning work and is not itself a conformance requirement.
 
-1. Minimal HTTP skeleton:
+1. Minimal router and HTTP API v1 skeleton:
    Start with configuration loading, command-line and environment overrides,
-   `/healthz`, `/readyz`, structured JSON errors, request IDs, and basic
-   structured logs. At this stage, filesystem APIs can remain stubbed.
+   router protocol registry loading with HTTP API v1 enabled, `/healthz`,
+   `/readyz`, structured JSON errors, request IDs, and basic structured logs.
+   At this stage, HTTP API v1 filesystem endpoints can remain stubbed.
 
 2. Authentication and identity resolution:
    Add JWT validation, issuer and audience validation when configured, username
@@ -3295,15 +3316,15 @@ planning work and is not itself a conformance requirement.
    framed router↔worker IPC; capability split by role; and the rule that each
    worker is bound to one resolved local identity for its lifetime.
 
-5. Read-only filesystem APIs:
-   Add Stat API, Directory API listing with limits and cursors, file reads
-   with range support, symbolic link reads, and xattr reads where supported.
-   Cover configured symlink and mount-boundary policy in this phase.
+5. Read-only HTTP API v1 filesystem endpoints:
+   Add API v1 Stat API, Directory API listing with limits and cursors, file
+   reads with range support, symbolic link reads, and xattr reads where
+   supported. Cover configured symlink and mount-boundary policy in this phase.
 
-6. Core write APIs:
-   Add create or replace file with atomic replacement, delete file,
-   create directory, remove empty directory, rename, and copy. Cover read-only
-   mode, request body limits, and structured error mapping.
+6. Core HTTP API v1 write endpoints:
+   Add create or replace file with atomic replacement, delete file, create
+   directory, remove empty directory, rename, and copy. Cover read-only mode,
+   request body limits, and structured error mapping.
 
 7. Worker pool and backpressure:
    Add supervisor-owned pool limits, `RequestWorker` / `ReleaseWorker` control
@@ -3333,7 +3354,8 @@ planning work and is not itself a conformance requirement.
     redaction, configuration validation, and operator-facing failure messages.
 
 12. Cross-origin resource sharing (CORS):
-    Add router CORS handling on `/api/v1/**` when `cors.enabled=true`.
+    Add router CORS handling for HTTP API v1 protocol routes under `/api/v1/**`
+    when `cors.enabled=true`.
 
 13. Full specification verification:
     Add end-to-end Linux integration tests for permission behavior, symlink
